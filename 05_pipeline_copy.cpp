@@ -86,18 +86,35 @@ int main(int argc, char* argv[])
         //   4. Wait for the previous write to complete (if any)
 
         bool has_pending_write = false;
+        int  bytes_read = 0;
 
         while (true) {
-            // 1. Reap the in-flight read
-            auto* read_cqe = ring.wait();
-            if (read_cqe->res < 0)
-                throw std::system_error(-read_cqe->res,
-                    std::system_category(), "read");
-            int bytes_read = read_cqe->res;
-            ring.seen(read_cqe);
+            // 1. Reap all pending CQEs (1 read + maybe 1 previous write).
+            //    CQEs can arrive in ANY order, so we check user_data
+            //    to tell them apart.
+
+            int to_reap = 1 + (has_pending_write ? 1 : 0);
+            bytes_read = 0;
+
+            for (int i = 0; i < to_reap; ++i) {
+                auto* cqe = ring.wait();
+
+                if (cqe->user_data == TAG_READ) {
+                    if (cqe->res < 0)
+                        throw std::system_error(-cqe->res,
+                            std::system_category(), "read");
+                    bytes_read = cqe->res;
+                } else {
+                    if (cqe->res < 0)
+                        throw std::system_error(-cqe->res,
+                            std::system_category(), "write");
+                }
+
+                ring.seen(cqe);
+            }
 
             if (bytes_read == 0)
-                break;
+                break;  // EOF
 
             int filled = cur;       // buffer that now has data
             cur ^= 1;              // swap to the other buffer
@@ -122,30 +139,18 @@ int main(int argc, char* argv[])
                     read_done = true;
             }
 
-            ring.submit();  // pushes write + read in one syscall
-
-            // 4. Wait for the PREVIOUS write to finish before we
-            //    loop and potentially reuse its buffer
-            if (has_pending_write) {
-                auto* write_cqe = ring.wait();
-                if (write_cqe->res < 0)
-                    throw std::system_error(-write_cqe->res,
-                        std::system_category(), "write");
-                ring.seen(write_cqe);
-            }
+            ring.submit();
 
             write_off += bytes_read;
             has_pending_write = true;
 
-            // No more reads submitted — drain the write we just
-            // submitted and exit.  Don't loop back to wait() for
-            // a read CQE that will never arrive.
+            // No more reads — drain the final write and exit
             if (!more_reads) {
-                auto* write_cqe = ring.wait();
-                if (write_cqe->res < 0)
-                    throw std::system_error(-write_cqe->res,
+                auto* cqe = ring.wait();
+                if (cqe->res < 0)
+                    throw std::system_error(-cqe->res,
                         std::system_category(), "write");
-                ring.seen(write_cqe);
+                ring.seen(cqe);
                 break;
             }
         }
