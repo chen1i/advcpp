@@ -1,0 +1,17 @@
+# Compiled binaries (same name as .cpp, no extension)
+01_basic_read
+02_batch_read
+03_*
+04_*
+05_*
+06_*
+
+# Build artifacts
+*.o
+*.d
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
