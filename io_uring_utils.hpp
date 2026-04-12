@@ -23,8 +23,8 @@
 
 class FileDescriptor {
 public:
-    explicit FileDescriptor(const char* path, int flags)
-        : fd_(open(path, flags))
+    explicit FileDescriptor(const char* path, int flags, mode_t mode = 0)
+        : fd_(open(path, flags, mode))
     {
         if (fd_ < 0)
             throw std::system_error(errno, std::system_category(), path);
