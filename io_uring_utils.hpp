@@ -99,6 +99,9 @@ public:
     // Advance the CQ head — must call after processing a CQE.
     void seen(io_uring_cqe* cqe) { io_uring_cqe_seen(&ring_, cqe); }
 
+    // Raw access for registration APIs (register_buffers, etc.)
+    io_uring* raw() { return &ring_; }
+
 private:
     io_uring ring_{};
 };
