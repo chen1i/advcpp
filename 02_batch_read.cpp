@@ -23,89 +23,14 @@
 // - Using user_data to identify which completion belongs to which file
 // - Completions may arrive in ANY order (kernel decides)
 
-#include <liburing.h>
-
-#include <fcntl.h>
-#include <unistd.h>
+#include "io_uring_utils.hpp"
 
 #include <array>
 #include <cstring>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
-#include <utility>
 #include <vector>
-
-// ─── RAII file descriptor (same as exercise 01) ─────────────────────
-
-class FileDescriptor {
-public:
-    explicit FileDescriptor(const char* path, int flags)
-        : fd_(open(path, flags))
-    {
-        if (fd_ < 0)
-            throw std::system_error(errno, std::system_category(), path);
-    }
-
-    ~FileDescriptor() { if (fd_ >= 0) close(fd_); }
-
-    FileDescriptor(FileDescriptor&& o) noexcept : fd_(std::exchange(o.fd_, -1)) {}
-    FileDescriptor& operator=(FileDescriptor&& o) noexcept {
-        if (this != &o) { if (fd_ >= 0) close(fd_); fd_ = std::exchange(o.fd_, -1); }
-        return *this;
-    }
-
-    FileDescriptor(const FileDescriptor&) = delete;
-    FileDescriptor& operator=(const FileDescriptor&) = delete;
-
-    int get() const { return fd_; }
-
-private:
-    int fd_;
-};
-
-// ─── RAII ring (same as exercise 01) ────────────────────────────────
-
-class Ring {
-public:
-    explicit Ring(unsigned queue_depth, unsigned flags = 0) {
-        int ret = io_uring_queue_init(queue_depth, &ring_, flags);
-        if (ret < 0)
-            throw std::system_error(-ret, std::system_category(), "io_uring_queue_init");
-    }
-    ~Ring() { io_uring_queue_exit(&ring_); }
-
-    Ring(const Ring&) = delete;
-    Ring& operator=(const Ring&) = delete;
-
-    io_uring_sqe* get_sqe() {
-        auto* sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) throw std::runtime_error("submission queue is full");
-        return sqe;
-    }
-
-    int submit() {
-        int ret = io_uring_submit(&ring_);
-        if (ret < 0)
-            throw std::system_error(-ret, std::system_category(), "io_uring_submit");
-        return ret;
-    }
-
-    io_uring_cqe* wait() {
-        io_uring_cqe* cqe = nullptr;
-        int ret = io_uring_wait_cqe(&ring_, &cqe);
-        if (ret < 0)
-            throw std::system_error(-ret, std::system_category(), "io_uring_wait_cqe");
-        return cqe;
-    }
-
-    void seen(io_uring_cqe* cqe) { io_uring_cqe_seen(&ring_, cqe); }
-
-private:
-    io_uring ring_{};
-};
 
 // ─── Per-request context ────────────────────────────────────────────
 //

@@ -1,1 +1,14 @@
 File B: bravo
+===========================================
+2K vBLK @ 1PF (virgo-029)
+===========================================
+spdk_rpc.py bdev_null_create nulldsk0 10240 512
+
+echo 0 > /sys/bus/pci/drivers/virtio-pci/0000\:a1\:00.1/sriov_drivers_autoprobe
+
+echo 2000 > /sys/bus/pci/drivers/virtio-pci/0000\:a1\:00.1/sriov_numvfs
+
+for vuid in $(snap_rpc.py emulation_function_list |yq '.[]|select(.emulation_type == "VBLK")|.vfs[]|select(.ctrl_id == null)|.vuid'); do
+  ctrlid=VBCtrlr${vuid:21}
+  snap_rpc.py virtio_blk_controller_create --vuid $vuid -c $ctrlid --bdev nulldsk0
+done
