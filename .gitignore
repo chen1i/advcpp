@@ -1,10 +1,7 @@
 # Compiled binaries (same name as .cpp, no extension)
-01_basic_read
-02_batch_read
-03_*
-04_*
-05_*
-06_*
+0[0-9]_*
+!*.cpp
+!*.hpp
 
 # Build artifacts
 *.o
