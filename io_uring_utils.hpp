@@ -96,6 +96,39 @@ public:
         return cqe;
     }
 
+    // Block until at least one CQE is ready, then return how many
+    // are available.  Caller should use peek()/seen() to drain them.
+    unsigned wait_batch()
+    {
+        io_uring_cqe* cqe = nullptr;
+        int ret = io_uring_wait_cqe(&ring_, &cqe);
+        if (ret < 0)
+            throw std::system_error(-ret, std::system_category(), "io_uring_wait_cqe");
+        return io_uring_cq_ready(&ring_);
+    }
+
+    // Submit all pending SQEs AND wait for at least min_complete CQEs
+    // in a single syscall.  Returns how many CQEs are ready.
+    unsigned submit_and_wait(unsigned min_complete = 1)
+    {
+        int ret = io_uring_submit_and_wait(&ring_, min_complete);
+        if (ret < 0)
+            throw std::system_error(-ret, std::system_category(),
+                                    "io_uring_submit_and_wait");
+        return io_uring_cq_ready(&ring_);
+    }
+
+    // Peek at the head CQE without blocking.  Returns nullptr if empty.
+    io_uring_cqe* peek()
+    {
+        io_uring_cqe* cqe = nullptr;
+        io_uring_peek_cqe(&ring_, &cqe);
+        return cqe;
+    }
+
+    // Advance the CQ head by count entries (batch version of seen).
+    void advance(unsigned count) { io_uring_cq_advance(&ring_, count); }
+
     // Advance the CQ head — must call after processing a CQE.
     void seen(io_uring_cqe* cqe) { io_uring_cqe_seen(&ring_, cqe); }
 
