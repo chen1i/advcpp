@@ -1,37 +1,14 @@
 #pragma once
 
-// Shared types and logic for the io_uring echo server variants.
+// Per-client-buffer echo server logic (exercises 07 and 09).
 //
-// Both the batched and naive servers use identical CQE handling —
-// the only difference is WHEN they call submit().  This header
-// provides handle_cqe() which queues SQEs but never submits,
-// letting each server control its own submission strategy.
+// Provides Client struct and handle_cqe() which queues SQEs
+// but never submits — callers control their own submission strategy.
 
-#include "io_uring_utils.hpp"
-
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include "echo_common.hpp"
 
 #include <array>
-#include <cstring>
-#include <iostream>
-#include <string_view>
 #include <unordered_map>
-
-// ─── Operation encoding ─────────────────────────────────────────────
-
-enum Op : __u64 {
-    OP_ACCEPT = 1ULL << 56,
-    OP_RECV   = 2ULL << 56,
-    OP_SEND   = 3ULL << 56,
-};
-
-static constexpr __u64 OP_MASK = 0xFF00'0000'0000'0000ULL;
-static constexpr __u64 FD_MASK = 0x00FF'FFFF'FFFF'FFFFULL;
-
-inline __u64 encode(Op op, int fd) { return op | static_cast<__u64>(fd); }
-inline Op    decode_op(__u64 ud)   { return static_cast<Op>(ud & OP_MASK); }
-inline int   decode_fd(__u64 ud)   { return static_cast<int>(ud & FD_MASK); }
 
 // ─── Per-client state ───────────────────────────────────────────────
 
@@ -42,40 +19,7 @@ struct Client {
     std::array<char, CLIENT_BUF_SIZE> buf{};
 };
 
-// ─── Listener setup ─────────────────────────────────────────────────
-
-inline int create_listener(int port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-        throw std::system_error(errno, std::system_category(), "socket");
-
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(fd);
-        throw std::system_error(errno, std::system_category(), "bind");
-    }
-
-    if (listen(fd, 128) < 0) {
-        close(fd);
-        throw std::system_error(errno, std::system_category(), "listen");
-    }
-
-    return fd;
-}
-
 // ─── CQE dispatch ───────────────────────────────────────────────────
-//
-// Processes one CQE: handles the completed operation and queues the
-// follow-up SQE(s).  Does NOT call submit() — the caller decides
-// when to flush.
 
 inline void handle_cqe(Ring& ring, int listen_fd,
                         sockaddr_in& client_addr, socklen_t& client_len,
