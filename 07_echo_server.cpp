@@ -9,13 +9,17 @@
 
 int main(int argc, char* argv[])
 {
+    std::ios_base::sync_with_stdio(false);
+    std::cout.tie(nullptr);
+
     int port = (argc > 1) ? std::stoi(argv[1]) : 9000;
 
     try {
         int listen_fd = create_listener(port);
         std::cout << "Listening on port " << port << " (io_uring batched)\n";
 
-        Ring ring(4096);
+        Ring ring(4096, IORING_SETUP_SINGLE_ISSUER
+                      | IORING_SETUP_DEFER_TASKRUN);
         std::unordered_map<int, Client> clients;
 
         sockaddr_in client_addr{};
