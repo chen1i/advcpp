@@ -1,0 +1,182 @@
+[
+  {
+    "file": "01_basic_read.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "01_basic_read",
+      "01_basic_read.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "01_basic_read"
+  },
+  {
+    "file": "02_batch_read.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "02_batch_read",
+      "02_batch_read.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "02_batch_read"
+  },
+  {
+    "file": "03_file_copy.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "03_file_copy",
+      "03_file_copy.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "03_file_copy"
+  },
+  {
+    "file": "04_linked_copy.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "04_linked_copy",
+      "04_linked_copy.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "04_linked_copy"
+  },
+  {
+    "file": "05_pipeline_copy.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "05_pipeline_copy",
+      "05_pipeline_copy.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "05_pipeline_copy"
+  },
+  {
+    "file": "06_fixed_buffers.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "06_fixed_buffers",
+      "06_fixed_buffers.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "06_fixed_buffers"
+  },
+  {
+    "file": "07_echo_server.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "07_echo_server",
+      "07_echo_server.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "07_echo_server"
+  },
+  {
+    "file": "07_echo_server_epoll.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "07_echo_server_epoll",
+      "07_echo_server_epoll.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "07_echo_server_epoll"
+  },
+  {
+    "file": "07_echo_server_uring_naive.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "07_echo_server_uring_naive",
+      "07_echo_server_uring_naive.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "07_echo_server_uring_naive"
+  },
+  {
+    "file": "08_echo_bench.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "08_echo_bench",
+      "08_echo_bench.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "08_echo_bench"
+  },
+  {
+    "file": "09_echo_sqpoll.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "09_echo_sqpoll",
+      "09_echo_sqpoll.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "09_echo_sqpoll"
+  },
+  {
+    "file": "10_provided_buffers.cpp",
+    "arguments": [
+      "g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-o",
+      "10_provided_buffers",
+      "10_provided_buffers.cpp"
+    ],
+    "directory": "/home/lic/Code/advcpp",
+    "output": "10_provided_buffers"
+  }
+]
