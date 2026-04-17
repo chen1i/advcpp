@@ -1,11 +1,5 @@
-# Compiled binaries (same name as .cpp, no extension)
-[0-9][0-9]_*
-!*.cpp
-!*.hpp
-
-# Build artifacts
-*.o
-*.d
+# CMake build directory
+build/
 
 # Editor / IDE
 .vscode/
