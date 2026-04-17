@@ -10,6 +10,10 @@ all: $(BINS)
 %: %.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
+# Boost.Asio samples need extra flags
+16_%: LDFLAGS += -lpthread
+16_%: CXXFLAGS += -DBOOST_ASIO_HAS_IO_URING
+
 clean:
 	rm -f $(BINS)
 
