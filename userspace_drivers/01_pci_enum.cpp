@@ -29,10 +29,12 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <print>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -147,12 +149,17 @@ static void print_device(const fs::path &dev_dir) {
 int main(int argc, char *argv[]) {
   fs::path pci_root = "/sys/bus/pci/devices";
 
-  // Optional filter: --vendor 1af4 to show only virtio
+  // Optional filters:
+  //   --vendor 1af4  → 16-bit vendor ID  (e.g. 1af4 = Red Hat / virtio)
+  //   --class  02    → 8-bit  class byte (e.g. 02   = Network)
   std::string vendor_filter;
+  std::string class_filter;
   for (int i = 1; i < argc - 1; ++i) {
-    if (std::string(argv[i]) == "--vendor") {
+    std::string_view arg = argv[i];
+    if (arg == "--vendor")
       vendor_filter = argv[i + 1];
-    }
+    else if (arg == "--class")
+      class_filter = argv[i + 1];
   }
 
   std::vector<fs::path> devices;
@@ -164,9 +171,13 @@ int main(int argc, char *argv[]) {
   for (const auto &dev : devices) {
     if (!vendor_filter.empty()) {
       uint32_t v = read_hex(dev / "vendor");
-      char buf[8];
-      snprintf(buf, sizeof(buf), "%04x", v);
-      if (vendor_filter != buf)
+      if (vendor_filter != std::format("{:04x}", v))
+        continue;
+    }
+    if (!class_filter.empty()) {
+      uint32_t c = read_hex(dev / "class");
+      uint8_t cls = (c >> 16) & 0xFF;
+      if (class_filter != std::format("{:02x}", cls))
         continue;
     }
     print_device(dev);
