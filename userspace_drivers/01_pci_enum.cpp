@@ -80,38 +80,23 @@ static std::vector<Bar> read_bars(const fs::path &resource_file) {
 }
 
 // ─── Class code → human name ────────────────────────────────────────
+//
+// class_code is 24-bit: (class << 16) | (subclass << 8) | prog_if
+// We only map the top byte (class).  See PCI Code and ID Assignment
+// Specification for the full list.
 
-static const char *class_name(uint32_t class_code) {
-  // class_code is 24-bit: (class << 16) | (subclass << 8) | prog_if
+static std::string_view class_name(uint32_t class_code) {
+  static constexpr std::pair<uint8_t, std::string_view> table[] = {
+      {0x00, "Unclassified"}, {0x01, "Mass Storage"}, {0x02, "Network"},
+      {0x03, "Display"},      {0x04, "Multimedia"},   {0x05, "Memory"},
+      {0x06, "Bridge"},       {0x07, "Communication"}, {0x08, "System"},
+      {0x09, "Input"},        {0x0C, "Serial Bus"},   {0x0D, "Wireless"},
+  };
   uint8_t cls = (class_code >> 16) & 0xFF;
-  switch (cls) {
-  case 0x00:
-    return "Unclassified";
-  case 0x01:
-    return "Mass Storage";
-  case 0x02:
-    return "Network";
-  case 0x03:
-    return "Display";
-  case 0x04:
-    return "Multimedia";
-  case 0x05:
-    return "Memory";
-  case 0x06:
-    return "Bridge";
-  case 0x07:
-    return "Communication";
-  case 0x08:
-    return "System";
-  case 0x09:
-    return "Input";
-  case 0x0C:
-    return "Serial Bus";
-  case 0x0D:
-    return "Wireless";
-  default:
-    return "Other";
-  }
+  for (const auto &[code, name] : table)
+    if (code == cls)
+      return name;
+  return "Other";
 }
 
 // ─── Print one device ───────────────────────────────────────────────
