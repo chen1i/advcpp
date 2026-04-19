@@ -173,10 +173,16 @@ static void dump_device(const fs::path &dev_dir,
 int main(int argc, char *argv[]) {
   fs::path pci_root = "/sys/bus/pci/devices";
 
-  // One-shot: dump a specific BDF
-  if (argc == 2 && std::string_view(argv[1]).starts_with("0000:")) {
-    auto cfg = read_config(pci_root / argv[1] / "config");
-    dump_device(pci_root / argv[1], cfg);
+  // One-shot: dump a specific BDF.  Accept either full form
+  // "DDDD:BB:DD.F" or short form "BB:DD.F" (domain 0000 assumed).
+  if (argc == 2 && std::string_view(argv[1]).contains(':')) {
+    std::string bdf = argv[1];
+    // Short form has one colon before the first dot (BB:DD.F).
+    // Full form has two (DDDD:BB:DD.F).
+    if (std::count(bdf.begin(), bdf.end(), ':') == 1)
+      bdf = "0000:" + bdf;
+    auto cfg = read_config(pci_root / bdf / "config");
+    dump_device(pci_root / bdf, cfg);
     return 0;
   }
 
