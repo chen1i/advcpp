@@ -10,3 +10,4 @@ function(add_exercise name)
 endfunction()
 
 add_exercise(01_pci_enum)
+add_exercise(02_config_space)
