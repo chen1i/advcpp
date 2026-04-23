@@ -11,3 +11,4 @@ endfunction()
 
 add_exercise(01_pci_enum)
 add_exercise(02_config_space)
+add_exercise(03_mmio)
