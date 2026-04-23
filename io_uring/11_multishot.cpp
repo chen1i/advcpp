@@ -39,11 +39,36 @@
 
 #include <sys/mman.h>
 
+#include <memory>
 #include <unordered_set>
 
 static constexpr unsigned BGID     = 0;
 static constexpr unsigned NUM_BUFS = 4096;
 static constexpr unsigned BUF_SIZE = 4096;
+
+enum EventType : __u64 {
+    EVT_ACCEPT = 1,
+    EVT_RECV   = 2,
+    EVT_SEND   = 3,
+};
+
+struct Event {
+    EventType type;
+    int fd;
+    Event(EventType event_type, int client_fd) : type(event_type), fd(client_fd) {}
+    virtual ~Event() = default;
+};
+
+struct SendEvent final : Event {
+    unsigned bid;
+    unsigned len;
+    unsigned offset;
+    bool rearm_recv;
+
+    SendEvent(int client_fd, unsigned buffer_id, unsigned bytes, bool rearm)
+        : Event{EVT_SEND, client_fd}, bid(buffer_id), len(bytes),
+          offset(0), rearm_recv(rearm) {}
+};
 
 int main(int argc, char* argv[])
 {
@@ -103,7 +128,14 @@ int main(int argc, char* argv[])
             sqe->flags    |= IOSQE_BUFFER_SELECT;
             sqe->ioprio   |= IORING_RECV_MULTISHOT;
             sqe->buf_group  = BGID;
-            io_uring_sqe_set_data64(sqe, encode(OP_RECV, fd));
+            io_uring_sqe_set_data(sqe, new Event{EVT_RECV, fd});
+        };
+
+        auto queue_send = [&](SendEvent* ev) {
+            auto* sqe = ring.get_sqe();
+            char* data = buf_pool + ev->bid * BUF_SIZE + ev->offset;
+            io_uring_prep_send(sqe, ev->fd, data, ev->len - ev->offset, 0);
+            io_uring_sqe_set_data(sqe, ev);
         };
 
         std::unordered_set<int> clients;
@@ -116,7 +148,7 @@ int main(int argc, char* argv[])
         io_uring_prep_multishot_accept(sqe, listen_fd,
                                        reinterpret_cast<sockaddr*>(&client_addr),
                                        &client_len, 0);
-        io_uring_sqe_set_data64(sqe, encode(OP_ACCEPT, listen_fd));
+        io_uring_sqe_set_data(sqe, new Event{EVT_ACCEPT, listen_fd});
 
         // ── Event loop ──────────────────────────────────────
 
@@ -127,9 +159,10 @@ int main(int argc, char* argv[])
                 auto* cqe = ring.peek();
                 if (!cqe) break;
 
-                __u64 ud    = cqe->user_data;
-                Op    op    = decode_op(ud);
-                int   fd    = decode_fd(ud);
+                std::unique_ptr<Event> ev(
+                    static_cast<Event*>(io_uring_cqe_get_data(cqe)));
+                EventType op = ev->type;
+                int   fd    = ev->fd;
                 int   res   = cqe->res;
                 __u32 flags = cqe->flags;
                 bool  more  = flags & IORING_CQE_F_MORE;
@@ -137,7 +170,7 @@ int main(int argc, char* argv[])
 
                 switch (op) {
 
-                case OP_ACCEPT: {
+                case EVT_ACCEPT: {
                     if (res >= 0) {
                         int client_fd = res;
                         clients.insert(client_fd);
@@ -152,13 +185,13 @@ int main(int argc, char* argv[])
                         io_uring_prep_multishot_accept(accept_sqe, listen_fd,
                             reinterpret_cast<sockaddr*>(&client_addr),
                             &client_len, 0);
-                        io_uring_sqe_set_data64(accept_sqe,
-                                                encode(OP_ACCEPT, listen_fd));
+                        io_uring_sqe_set_data(accept_sqe,
+                                              new Event{EVT_ACCEPT, listen_fd});
                     }
                     break;
                 }
 
-                case OP_RECV: {
+                case EVT_RECV: {
                     if (res == -ENOBUFS) {
                         // Pool exhausted — re-arm after buffers recycle
                         queue_multishot_recv(fd);
@@ -175,38 +208,33 @@ int main(int argc, char* argv[])
                         char* data = buf_pool + bid * BUF_SIZE;
                         std::cout << "fd " << fd << ": "
                                   << std::string_view(data, res);
-                        // Echo back
-                        auto* send_sqe = ring.get_sqe();
-                        io_uring_prep_send(send_sqe, fd, data, res, 0);
-                        io_uring_sqe_set_data64(send_sqe,
-                            encode(OP_SEND, fd) | (static_cast<__u64>(bid) << 32));
-
-                        // If MORE is not set, multi-shot recv ended —
-                        // re-arm after send completes.
-                        // We encode this in a bit so OP_SEND knows.
-                        if (!more) {
-                            // Use bit 55 to signal "re-arm recv after send"
-                            auto ud2 = encode(OP_SEND, fd)
-                                     | (static_cast<__u64>(bid) << 32)
-                                     | (1ULL << 55);
-                            io_uring_sqe_set_data64(send_sqe, ud2);
-                        }
+                        auto* send_ev = new SendEvent(fd, bid,
+                                                      static_cast<unsigned>(res),
+                                                      !more);
+                        queue_send(send_ev);
                     }
                     break;
                 }
 
-                case OP_SEND: {
-                    unsigned bid = (ud >> 32) & 0xFFFFFF;
-                    bool rearm_recv = (ud >> 55) & 1;
-                    recycle_buf(bid);
-
-                    if (res < 0) {
+                case EVT_SEND: {
+                    auto* send_ev = static_cast<SendEvent*>(ev.release());
+                    std::unique_ptr<SendEvent> send_guard(send_ev);
+                    if (res <= 0) {
+                        recycle_buf(send_ev->bid);
                         std::cerr << "send (fd " << fd << "): "
-                                  << strerror(-res) << "\n";
+                                  << (res < 0 ? strerror(-res) : "made no progress")
+                                  << "\n";
                         close(fd);
                         clients.erase(fd);
-                    } else if (rearm_recv && clients.count(fd)) {
-                        queue_multishot_recv(fd);
+                    } else {
+                        send_ev->offset += static_cast<unsigned>(res);
+                        if (send_ev->offset < send_ev->len) {
+                            queue_send(send_guard.release());
+                        } else {
+                            recycle_buf(send_ev->bid);
+                            if (send_ev->rearm_recv && clients.count(fd))
+                                queue_multishot_recv(fd);
+                        }
                     }
                     break;
                 }

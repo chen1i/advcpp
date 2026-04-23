@@ -191,8 +191,17 @@ Task client_handler(Ring& ring, int fd)
 
     if (path.empty()) {
         auto resp = make_response_header(400, "Bad Request", 0);
-        AsyncSend send_op(ring, fd, resp.data(), resp.size());
-        co_await send_op;
+        int total_sent = 0;
+        while (total_sent < static_cast<int>(resp.size())) {
+            AsyncSend send_op(ring, fd, resp.data() + total_sent,
+                              resp.size() - total_sent);
+            int sent = co_await send_op;
+            if (sent <= 0) {
+                close(fd);
+                co_return;
+            }
+            total_sent += sent;
+        }
         close(fd);
         co_return;
     }
@@ -203,8 +212,17 @@ Task client_handler(Ring& ring, int fd)
         std::string body = "404 Not Found: " + path + "\n";
         auto resp = make_response_header(404, "Not Found", body.size());
         resp += body;
-        AsyncSend send_op(ring, fd, resp.data(), resp.size());
-        co_await send_op;
+        int total_sent = 0;
+        while (total_sent < static_cast<int>(resp.size())) {
+            AsyncSend send_op(ring, fd, resp.data() + total_sent,
+                              resp.size() - total_sent);
+            int sent = co_await send_op;
+            if (sent <= 0) {
+                close(fd);
+                co_return;
+            }
+            total_sent += sent;
+        }
         close(fd);
         co_return;
     }
@@ -217,12 +235,17 @@ Task client_handler(Ring& ring, int fd)
     // 5. Send HTTP header
     auto header = make_response_header(200, "OK", file_size);
     {
-        AsyncSend send_op(ring, fd, header.data(), header.size());
-        int sent = co_await send_op;
-        if (sent <= 0) {
-            close(file_fd);
-            close(fd);
-            co_return;
+        int total_sent = 0;
+        while (total_sent < static_cast<int>(header.size())) {
+            AsyncSend send_op(ring, fd, header.data() + total_sent,
+                              header.size() - total_sent);
+            int sent = co_await send_op;
+            if (sent <= 0) {
+                close(file_fd);
+                close(fd);
+                co_return;
+            }
+            total_sent += sent;
         }
     }
 
@@ -235,9 +258,19 @@ Task client_handler(Ring& ring, int fd)
         int bytes_read = co_await read_op;
         if (bytes_read <= 0) break;
 
-        AsyncSend send_op(ring, fd, buf.data(), bytes_read);
-        int sent = co_await send_op;
-        if (sent <= 0) break;
+        int total_sent = 0;
+        while (total_sent < bytes_read) {
+            AsyncSend send_op(ring, fd, buf.data() + total_sent,
+                              bytes_read - total_sent);
+            int sent = co_await send_op;
+            if (sent <= 0) {
+                total_sent = -1;
+                break;
+            }
+            total_sent += sent;
+        }
+        if (total_sent < 0)
+            break;
 
         offset += bytes_read;
     }

@@ -168,13 +168,22 @@ Task client_handler(Ring& ring, int fd)
         std::cout << "fd " << fd << ": "
                   << std::string_view(buf.data(), n);
 
-        AsyncSend send_op(ring, fd, buf.data(), n);
-        int sent = co_await send_op;
-        if (sent < 0) {
-            std::cerr << "send (fd " << fd << "): "
-                      << strerror(-sent) << "\n";
-            break;
+        int total_sent = 0;
+        while (total_sent < n) {
+            AsyncSend send_op(ring, fd, buf.data() + total_sent, n - total_sent);
+            int sent = co_await send_op;
+            if (sent <= 0) {
+                if (sent < 0)
+                    std::cerr << "send (fd " << fd << "): "
+                              << strerror(-sent) << "\n";
+                else
+                    std::cerr << "send (fd " << fd << "): made no progress\n";
+                break;
+            }
+            total_sent += sent;
         }
+        if (total_sent < n)
+            break;
     }
 
     close(fd);

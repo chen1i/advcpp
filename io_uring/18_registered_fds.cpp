@@ -158,9 +158,22 @@ Task client_handler(Ring& ring, int slot)
         std::cout << "slot " << slot << ": "
                   << std::string_view(buf.data(), n);
 
-        AsyncSendFixed send_op(ring, slot, buf.data(), n);
-        int sent = co_await send_op;
-        if (sent <= 0) break;
+        int total_sent = 0;
+        while (total_sent < n) {
+            AsyncSendFixed send_op(ring, slot, buf.data() + total_sent, n - total_sent);
+            int sent = co_await send_op;
+            if (sent <= 0) {
+                if (sent < 0)
+                    std::cerr << "send (slot " << slot << "): "
+                              << strerror(-sent) << "\n";
+                else
+                    std::cerr << "send (slot " << slot << "): made no progress\n";
+                break;
+            }
+            total_sent += sent;
+        }
+        if (total_sent < n)
+            break;
     }
 
     AsyncCloseFixed close_op(ring, slot);
