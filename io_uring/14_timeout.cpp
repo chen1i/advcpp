@@ -102,9 +102,10 @@ struct AsyncRecvTimeout : IoRequest {
     int fd; char* buf; unsigned len;
     int timeout_sec;
 
-    // Dummy IoRequest for the timeout CQE — the event loop
-    // resumes noop_coroutine which does nothing.
-    IoRequest timeout_req;
+    // Dummy IoRequest for the timeout CQE — allocated on the heap
+    // because the timeout CQE can arrive after the recv CQE resumes
+    // and destroys this awaitable.
+    IoRequest* timeout_req = nullptr;
 
     AsyncRecvTimeout(Ring& r, int f, char* b, unsigned l, int t)
         : ring(r), fd(f), buf(b), len(l), timeout_sec(t) {}
@@ -128,9 +129,8 @@ struct AsyncRecvTimeout : IoRequest {
         // loop can handle it.  We use noop_coroutine — resuming
         // it does nothing.  Only the recv CQE resumes our real
         // coroutine.
-        timeout_req.handle = std::noop_coroutine();
-        io_uring_sqe_set_data(timeout_sqe,
-                              static_cast<IoRequest*>(&timeout_req));
+        timeout_req = new IoRequest{ std::noop_coroutine(), 0 };
+        io_uring_sqe_set_data(timeout_sqe, timeout_req);
     }
 
     int await_resume() { return result; }
@@ -237,6 +237,11 @@ int main(int argc, char* argv[])
                     io_uring_cqe_get_data(cqe));
                 int res = cqe->res;
                 ring.seen(cqe);
+
+                if (req->handle == std::noop_coroutine()) {
+                    delete req;
+                    continue;
+                }
 
                 req->result = res;
                 req->handle.resume();

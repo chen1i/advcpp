@@ -171,6 +171,9 @@ int main(int argc, char* argv[])
                 switch (op) {
 
                 case EVT_ACCEPT: {
+                    if (more)
+                        ev.release();
+
                     if (res >= 0) {
                         int client_fd = res;
                         clients.insert(client_fd);
@@ -192,6 +195,9 @@ int main(int argc, char* argv[])
                 }
 
                 case EVT_RECV: {
+                    if (more)
+                        ev.release();
+
                     if (res == -ENOBUFS) {
                         // Pool exhausted — re-arm after buffers recycle
                         queue_multishot_recv(fd);
