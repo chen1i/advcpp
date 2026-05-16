@@ -113,19 +113,6 @@ struct AsyncRead : IoRequest {
     int await_resume() { return result; }
 };
 
-// ─── Send all helper ────────────────────────────────────────────────
-
-Task async_send_all(Ring& ring, int fd, const char* data, int len)
-{
-    while (len > 0) {
-        AsyncSend op(ring, fd, data, len);
-        int n = co_await op;
-        if (n <= 0) break;
-        data += n;
-        len  -= n;
-    }
-}
-
 // ─── HTTP helpers ───────────────────────────────────────────────────
 
 static std::string parse_path(const char* request, int len)

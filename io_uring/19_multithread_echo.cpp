@@ -14,11 +14,11 @@
 // New connections are assigned round-robin to workers.
 // Each worker has its own ring — no sharing, no locking.
 //
-// How to pass an fd to another ring
-// ──────────────────────────────────
-// We use io_uring_prep_msg_ring to send a message from the accept
-// ring to a worker ring.  The worker's CQE delivers the fd as
-// user_data.  This is lock-free, zero-copy inter-ring communication.
+// How to pass an fd to another worker
+// ───────────────────────────────────
+// The accept thread pushes new fds into each worker's SPSC queue and
+// wakes the target worker with eventfd.  The worker polls that eventfd
+// through its own ring, drains the queue, and starts one coroutine per fd.
 //
 // Why thread-per-ring
 // ───────────────────
@@ -29,8 +29,8 @@
 //
 // New concepts
 // ────────────
-// - io_uring_prep_msg_ring  — send a message to another ring
-// - IORING_MSG_DATA         — deliver arbitrary data via CQE
+// - eventfd                 — wake another ring from the accept thread
+// - SPSC queue              — transfer accepted fds to one worker
 // - Thread-per-ring pattern — shared-nothing architecture
 // - Round-robin connection distribution
 
@@ -97,10 +97,10 @@ struct AsyncSend : IoRequest {
   int await_resume() { return result; }
 };
 
-// ─── Sentinel for new-connection CQEs from msg_ring ─────────────────
+// ─── Sentinel for new-connection wakeups ────────────────────────────
 
-// When the accept thread sends us a new fd via msg_ring, we get a
-// CQE with user_data = NEW_CONN_TAG.  The fd is in cqe->res.
+// When the worker's eventfd becomes readable, poll produces a CQE with
+// user_data = NEW_CONN_TAG.  The worker then drains its fd queue.
 static constexpr __u64 NEW_CONN_TAG = 0xFFFF'FFFF'FFFF'FFFFULL;
 
 // ─── Per-client coroutine ───────────────────────────────────────────

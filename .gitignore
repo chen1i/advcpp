@@ -1,6 +1,9 @@
 # CMake build directory
 build/
 
+# Local Codex runtime/sandbox artifact
+.codex
+
 # Editor / IDE
 .vscode/
 .idea/

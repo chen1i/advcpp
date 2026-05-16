@@ -204,6 +204,14 @@ int main(int argc, char* argv[])
                         close(fd);
                         clients.erase(fd);
                     } else {
+                        if (!(flags & IORING_CQE_F_BUFFER)) {
+                            std::cerr << "recv (fd " << fd
+                                      << "): missing provided-buffer id\n";
+                            close(fd);
+                            clients.erase(fd);
+                            break;
+                        }
+
                         // The kernel picked a buffer for us
                         unsigned bid = flags >> IORING_CQE_BUFFER_SHIFT;
 
