@@ -44,6 +44,9 @@ struct Client {
     int  fd        = -1;
     int  remaining = 0;    // rounds left
     bool ok        = true; // all echoes matched?
+    int  send_len  = 0;
+    int  send_off  = 0;
+    int  recv_off  = 0;
     char send_buf[MSG_SIZE];
     char recv_buf[MSG_SIZE];
 };
@@ -78,8 +81,8 @@ int main(int argc, char* argv[])
         std::vector<Client> clients(num_clients);
         for (int i = 0; i < num_clients; ++i) {
             clients[i].remaining = rounds;
-            snprintf(clients[i].send_buf, MSG_SIZE,
-                     "client %d ping\n", i);
+            clients[i].send_len = snprintf(clients[i].send_buf, MSG_SIZE,
+                                           "client %d ping\n", i);
         }
 
         // Ring big enough for all concurrent operations
@@ -129,25 +132,40 @@ int main(int argc, char* argv[])
                         ++clients_done;
                     } else {
                         // Connected — send first message
-                        int len = strlen(c.send_buf);
+                        c.send_off = 0;
+                        c.recv_off = 0;
                         auto* sqe = ring.get_sqe();
                         io_uring_prep_send(sqe, c.fd,
-                                           c.send_buf, len, 0);
+                                           c.send_buf, c.send_len, 0);
                         io_uring_sqe_set_data64(sqe, encode(OP_SEND, id));
                     }
                     break;
                 }
 
                 case OP_SEND: {
-                    if (res < 0) {
+                    if (res <= 0) {
                         c.ok = false;
+                        if (c.fd >= 0) {
+                            close(c.fd);
+                            c.fd = -1;
+                        }
                         ++clients_done;
                     } else {
-                        // Send done — recv the echo
-                        auto* sqe = ring.get_sqe();
-                        io_uring_prep_recv(sqe, c.fd,
-                                           c.recv_buf, MSG_SIZE, 0);
-                        io_uring_sqe_set_data64(sqe, encode(OP_RECV, id));
+                        c.send_off += res;
+                        if (c.send_off < c.send_len) {
+                            auto* sqe = ring.get_sqe();
+                            io_uring_prep_send(sqe, c.fd,
+                                               c.send_buf + c.send_off,
+                                               c.send_len - c.send_off, 0);
+                            io_uring_sqe_set_data64(sqe, encode(OP_SEND, id));
+                        } else {
+                            // Send done — recv the echo
+                            c.recv_off = 0;
+                            auto* sqe = ring.get_sqe();
+                            io_uring_prep_recv(sqe, c.fd,
+                                               c.recv_buf, c.send_len, 0);
+                            io_uring_sqe_set_data64(sqe, encode(OP_RECV, id));
+                        }
                     }
                     break;
                 }
@@ -155,27 +173,36 @@ int main(int argc, char* argv[])
                 case OP_RECV: {
                     if (res <= 0) {
                         c.ok = false;
-                        ++clients_done;
-                    } else {
-                        // Verify echo
-                        int len = strlen(c.send_buf);
-                        if (res != len ||
-                            memcmp(c.recv_buf, c.send_buf, len) != 0) {
-                            c.ok = false;
-                        }
-
-                        --c.remaining;
-                        if (c.remaining <= 0) {
+                        if (c.fd >= 0) {
                             close(c.fd);
                             c.fd = -1;
-                            ++clients_done;
-                        } else {
-                            // Next round — send again
+                        }
+                        ++clients_done;
+                    } else {
+                        c.recv_off += res;
+                        if (c.recv_off < c.send_len) {
                             auto* sqe = ring.get_sqe();
-                            io_uring_prep_send(sqe, c.fd,
-                                               c.send_buf, len, 0);
-                            io_uring_sqe_set_data64(sqe,
-                                                    encode(OP_SEND, id));
+                            io_uring_prep_recv(sqe, c.fd,
+                                               c.recv_buf + c.recv_off,
+                                               c.send_len - c.recv_off, 0);
+                            io_uring_sqe_set_data64(sqe, encode(OP_RECV, id));
+                        } else {
+                            if (memcmp(c.recv_buf, c.send_buf, c.send_len) != 0)
+                                c.ok = false;
+
+                            --c.remaining;
+                            if (c.remaining <= 0 || !c.ok) {
+                                close(c.fd);
+                                c.fd = -1;
+                                ++clients_done;
+                            } else {
+                                c.send_off = 0;
+                                auto* sqe = ring.get_sqe();
+                                io_uring_prep_send(sqe, c.fd,
+                                                   c.send_buf, c.send_len, 0);
+                                io_uring_sqe_set_data64(sqe,
+                                                        encode(OP_SEND, id));
+                            }
                         }
                     }
                     break;

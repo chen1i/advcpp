@@ -17,6 +17,8 @@ static constexpr std::size_t CLIENT_BUF_SIZE = 4096;
 struct Client {
     int  fd;
     std::array<char, CLIENT_BUF_SIZE> buf{};
+    std::size_t send_len = 0;
+    std::size_t send_offset = 0;
 };
 
 // ─── CQE dispatch ───────────────────────────────────────────────────
@@ -61,25 +63,40 @@ inline void handle_cqe(Ring& ring, int listen_fd,
             clients.erase(fd);
         } else {
             auto& c = clients[fd];
+            c.send_len = static_cast<std::size_t>(res);
+            c.send_offset = 0;
             std::cout << "fd " << fd << ": "
                       << std::string_view(c.buf.data(), res);
             auto* send_sqe = ring.get_sqe();
-            io_uring_prep_send(send_sqe, fd, c.buf.data(), res, 0);
+            io_uring_prep_send(send_sqe, fd, c.buf.data(), c.send_len, 0);
             io_uring_sqe_set_data64(send_sqe, encode(OP_SEND, fd));
         }
         break;
     }
 
     case OP_SEND: {
-        if (res < 0) {
-            std::cerr << "send (fd " << fd << "): "
-                      << strerror(-res) << "\n";
+        auto it = clients.find(fd);
+        if (it == clients.end())
+            break;
+
+        auto& c = it->second;
+        if (res <= 0) {
+            if (res < 0)
+                std::cerr << "send (fd " << fd << "): "
+                          << strerror(-res) << "\n";
+            else
+                std::cerr << "send (fd " << fd << "): made no progress\n";
             close(fd);
-            clients.erase(fd);
+            clients.erase(it);
         } else {
-            auto it = clients.find(fd);
-            if (it != clients.end()) {
-                auto& c = it->second;
+            c.send_offset += static_cast<std::size_t>(res);
+            if (c.send_offset < c.send_len) {
+                auto* send_sqe = ring.get_sqe();
+                io_uring_prep_send(send_sqe, fd,
+                                   c.buf.data() + c.send_offset,
+                                   c.send_len - c.send_offset, 0);
+                io_uring_sqe_set_data64(send_sqe, encode(OP_SEND, fd));
+            } else {
                 auto* recv_sqe = ring.get_sqe();
                 io_uring_prep_recv(recv_sqe, fd,
                                    c.buf.data(), c.buf.size(), 0);
