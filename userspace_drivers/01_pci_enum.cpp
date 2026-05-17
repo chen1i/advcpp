@@ -134,6 +134,16 @@ static void print_device(const fs::path &dev_dir) {
 int main(int argc, char *argv[]) {
   fs::path pci_root = "/sys/bus/pci/devices";
 
+  // One-shot: print a specific BDF.  Accept either full form
+  // "DDDD:BB:DD.F" or short form "BB:DD.F" (domain 0000 assumed).
+  if (argc == 2 && std::string_view(argv[1]).contains(':')) {
+    std::string bdf = argv[1];
+    if (std::count(bdf.begin(), bdf.end(), ':') == 1)
+      bdf = "0000:" + bdf;
+    print_device(pci_root / bdf);
+    return 0;
+  }
+
   // Optional filters:
   //   --vendor 1af4  → 16-bit vendor ID  (e.g. 1af4 = Red Hat / virtio)
   //   --class  02    → 8-bit  class byte (e.g. 02   = Network)
