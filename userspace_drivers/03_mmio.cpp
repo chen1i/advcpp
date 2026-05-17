@@ -44,39 +44,71 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <print>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 
 namespace fs = std::filesystem;
 
+// ─── Parse one BAR line from the device's resource table ────────────
+
+struct BarResource {
+  uint64_t start = 0;
+  uint64_t end = 0;
+  uint64_t flags = 0;
+
+  uint64_t size() const { return end >= start ? end - start + 1 : 0; }
+  bool is_io() const { return flags & 0x01; }
+};
+
+static BarResource read_bar_resource(const fs::path &dev_dir, int bar) {
+  if (bar < 0 || bar > 5)
+    throw std::invalid_argument("BAR index must be 0..5");
+
+  std::ifstream f(dev_dir / "resource");
+  if (!f)
+    throw std::runtime_error(std::format("cannot open {}", (dev_dir / "resource").string()));
+
+  std::string line;
+  for (int i = 0; i <= bar; ++i) {
+    if (!std::getline(f, line))
+      throw std::runtime_error(std::format("missing BAR{} in resource table", bar));
+  }
+
+  BarResource r{};
+  std::istringstream iss(line);
+  iss >> std::hex >> r.start >> r.end >> r.flags;
+  if (!iss)
+    throw std::runtime_error(std::format("cannot parse BAR{} resource line", bar));
+  return r;
+}
+
 // ─── RAII wrapper for mmap'd region ─────────────────────────────────
 
 class MmioRegion {
 public:
-  MmioRegion(const fs::path &resource_file, bool writable = false) {
+  MmioRegion(const fs::path &resource_file, size_t size, bool writable = false)
+      : size_(size) {
+    if (size_ == 0)
+      throw std::invalid_argument("cannot mmap a zero-sized BAR");
+
     int flags = writable ? O_RDWR : O_RDONLY;
     fd_ = open(resource_file.c_str(), flags);
     if (fd_ < 0)
       throw std::system_error(errno, std::system_category(),
                               "open " + resource_file.string());
-
-    struct stat st{};
-    if (fstat(fd_, &st) < 0) {
-      close(fd_);
-      throw std::system_error(errno, std::system_category(), "fstat");
-    }
-    size_ = st.st_size;
 
     int prot = PROT_READ | (writable ? PROT_WRITE : 0);
     void *p = mmap(nullptr, size_, prot, MAP_SHARED, fd_, 0);
@@ -167,9 +199,20 @@ int main(int argc, char *argv[]) {
 
   fs::path resource =
       fs::path("/sys/bus/pci/devices") / bdf / std::format("resource{}", bar);
+  fs::path dev_dir = fs::path("/sys/bus/pci/devices") / bdf;
 
   try {
-    MmioRegion r(resource);
+    BarResource bar_resource = read_bar_resource(dev_dir, bar);
+    if (bar_resource.size() == 0)
+      throw std::runtime_error(std::format("BAR{} is not present", bar));
+    if (bar_resource.is_io())
+      throw std::runtime_error(std::format("BAR{} is an I/O BAR; only memory BARs can be mmap'd",
+                                           bar));
+    if (offset >= bar_resource.size())
+      throw std::out_of_range(std::format("offset {:#x} is past BAR{} size {:#x}",
+                                          offset, bar, bar_resource.size()));
+
+    MmioRegion r(resource, static_cast<size_t>(bar_resource.size()));
     std::println("Mapped {} ({} bytes)", resource.string(), r.size());
     std::println("Dumping {} bytes at offset {:#x}:", length, offset);
     hexdump(r, offset, std::min(length, r.size() - offset));
