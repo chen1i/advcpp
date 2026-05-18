@@ -914,7 +914,7 @@ static binary portability
 vfio-pci vs unbound
 ```
 
-下一步建议：
+下一步是：
 
 ```text
 04_bind_unbind.cpp
@@ -928,7 +928,7 @@ vfio-pci vs unbound
 /sys/bus/pci/drivers/<driver>/bind
 ```
 
-但是这个操作会改变真实设备绑定状态，必须有 dry-run 和显式确认参数。
+这个 sample 用 `--show` 查看当前绑定关系，用 `--dry-run` 预览 bind/unbind 会写哪个 sysfs 文件。真正执行必须显式传 `--yes`，因为这个操作会改变真实设备绑定状态。
 
 更后面再进入：
 
