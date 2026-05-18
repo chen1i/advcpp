@@ -789,7 +789,23 @@ binary 在较新的系统上编译
 目标机器 glibc/libstdc++ 较旧
 ```
 
-解决方式之一是全静态链接：
+解决方式之一是让 CMake 额外生成全静态版本：
+
+```bash
+cmake -S userspace_drivers -B userspace_drivers/build -DBUILD_STATIC_BINARIES=ON
+cmake --build userspace_drivers/build
+```
+
+生成的程序名会带 `_static` 后缀：
+
+```text
+userspace_drivers/build/01_pci_enum_static
+userspace_drivers/build/02_config_space_static
+userspace_drivers/build/03_mmio_static
+userspace_drivers/build/04_bind_unbind_static
+```
+
+等价的手工编译方式是：
 
 ```bash
 g++ -std=c++23 -O2 -static -static-libstdc++ -static-libgcc \

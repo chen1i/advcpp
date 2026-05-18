@@ -13,6 +13,8 @@ This repo is a C++ learning project with two independent tracks:
   `cmake -S io_uring -B io_uring/build && cmake --build io_uring/build`
 - Build userspace driver exercises:
   `cmake -S userspace_drivers -B userspace_drivers/build && cmake --build userspace_drivers/build`
+- Build userspace driver exercises with additional fully static binaries:
+  `cmake -S userspace_drivers -B userspace_drivers/build -DBUILD_STATIC_BINARIES=ON && cmake --build userspace_drivers/build`
 - Basic smoke test:
   `cd io_uring && ./01_basic_read sample.txt`
 - Echo-server smoke test:
