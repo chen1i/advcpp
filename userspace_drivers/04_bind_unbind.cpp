@@ -16,6 +16,8 @@
 // Writing a BDF to bind asks a driver to claim that device.  The bind
 // operation still has to match the driver.  For vfio-pci, driver_override
 // is the usual way to say "bind this exact device to vfio-pci".
+// Rebind combines both steps: unbind the current driver if present, then
+// bind the target driver.
 //
 // Safety note
 // ───────────
@@ -58,12 +60,14 @@ static void usage(const char *argv0) {
                "Usage:\n"
                "  {} <BDF> --show\n"
                "  {} <BDF> --unbind [--dry-run|--yes]\n"
-               "  {} <BDF> --bind <driver> [--override] [--dry-run|--yes]\n\n"
+               "  {} <BDF> --bind <driver> [--override] [--dry-run|--yes]\n"
+               "  {} <BDF> --rebind <driver> [--override] [--dry-run|--yes]\n\n"
                "Examples:\n"
                "  {} c1:02.7 --show\n"
                "  {} c1:02.7 --unbind --dry-run\n"
-               "  {} c1:02.7 --bind vfio-pci --override --dry-run",
-               argv0, argv0, argv0, argv0, argv0, argv0);
+               "  {} c1:02.7 --bind vfio-pci --override --dry-run\n"
+               "  {} c1:02.7 --rebind vfio-pci --override --dry-run",
+               argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 struct DriverInfo {
@@ -198,6 +202,40 @@ static void verify_bound(const std::string &bdf, const fs::path &dev_dir,
   throw std::runtime_error(message);
 }
 
+static void unbind_current(const std::string &bdf, const fs::path &dev_dir,
+                           bool yes) {
+  DriverInfo driver = current_driver(dev_dir);
+  if (!driver.bound) {
+    std::println("{} is already unbound", bdf);
+    return;
+  }
+
+  maybe_write_value(driver.path / "unbind", bdf, yes);
+  if (yes)
+    verify_unbound(bdf, dev_dir);
+}
+
+static fs::path require_driver_dir(const std::string &target_driver) {
+  fs::path driver_dir = fs::path("/sys/bus/pci/drivers") / target_driver;
+  if (!fs::exists(driver_dir)) {
+    throw std::runtime_error("driver " + target_driver + " does not exist");
+  }
+  return driver_dir;
+}
+
+static void bind_to_driver(const std::string &bdf, const fs::path &dev_dir,
+                           const std::string &target_driver,
+                           bool use_override, bool yes) {
+  fs::path driver_dir = require_driver_dir(target_driver);
+
+  if (use_override)
+    maybe_write_value(dev_dir / "driver_override", target_driver, yes);
+  maybe_write_value(driver_dir / "bind", bdf, yes);
+
+  if (yes)
+    verify_bound(bdf, dev_dir, target_driver, use_override);
+}
+
 int main(int argc, char *argv[]) {
   if (argc < 3) {
     usage(argv[0]);
@@ -215,9 +253,11 @@ int main(int argc, char *argv[]) {
 
   bool show = false;
   bool unbind = false;
+  bool bind = false;
+  bool rebind = false;
   bool yes = false;
   bool use_override = false;
-  std::string bind_driver;
+  std::string target_driver;
 
   for (int i = 2; i < argc; ++i) {
     std::string_view arg = argv[i];
@@ -226,7 +266,11 @@ int main(int argc, char *argv[]) {
     } else if (arg == "--unbind") {
       unbind = true;
     } else if (arg == "--bind" && i + 1 < argc) {
-      bind_driver = argv[++i];
+      bind = true;
+      target_driver = argv[++i];
+    } else if (arg == "--rebind" && i + 1 < argc) {
+      rebind = true;
+      target_driver = argv[++i];
     } else if (arg == "--override") {
       use_override = true;
     } else if (arg == "--dry-run") {
@@ -240,12 +284,12 @@ int main(int argc, char *argv[]) {
   }
 
   int actions = static_cast<int>(show) + static_cast<int>(unbind) +
-                static_cast<int>(!bind_driver.empty());
+                static_cast<int>(bind) + static_cast<int>(rebind);
   if (actions != 1) {
     usage(argv[0]);
     return 1;
   }
-  if (use_override && bind_driver.empty()) {
+  if (use_override && !bind && !rebind) {
     usage(argv[0]);
     return 1;
   }
@@ -257,31 +301,29 @@ int main(int argc, char *argv[]) {
     }
 
     if (unbind) {
-      DriverInfo driver = current_driver(dev_dir);
-      if (!driver.bound) {
-        std::println("{} is already unbound", bdf);
-        return 0;
-      }
-      maybe_write_value(driver.path / "unbind", bdf, yes);
-      if (yes)
-        verify_unbound(bdf, dev_dir);
-      else
+      unbind_current(bdf, dev_dir, yes);
+      if (!yes)
         std::println("Pass --yes to perform this operation.");
       return 0;
     }
 
-    fs::path driver_dir = fs::path("/sys/bus/pci/drivers") / bind_driver;
-    if (!fs::exists(driver_dir)) {
-      std::println(std::cerr, "Error: driver {} does not exist", bind_driver);
-      return 1;
+    if (rebind) {
+      require_driver_dir(target_driver);
+      unbind_current(bdf, dev_dir, yes);
+      bind_to_driver(bdf, dev_dir, target_driver, use_override, yes);
+      if (!yes)
+        std::println("Pass --yes to perform this operation.");
+      return 0;
     }
 
-    if (use_override)
-      maybe_write_value(dev_dir / "driver_override", bind_driver, yes);
-    maybe_write_value(driver_dir / "bind", bdf, yes);
-    if (yes)
-      verify_bound(bdf, dev_dir, bind_driver, use_override);
-    else
+    if (bind) {
+      bind_to_driver(bdf, dev_dir, target_driver, use_override, yes);
+      if (!yes)
+        std::println("Pass --yes to perform this operation.");
+      return 0;
+    }
+
+    if (!yes)
       std::println("Pass --yes to perform this operation.");
     return 0;
 

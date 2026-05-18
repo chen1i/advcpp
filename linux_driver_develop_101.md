@@ -947,6 +947,14 @@ vfio-pci vs unbound
 
 这个 sample 用 `--show` 查看当前绑定关系，用 `--dry-run` 预览 bind/unbind 会写哪个 sysfs 文件。真正执行必须显式传 `--yes`，因为这个操作会改变真实设备绑定状态。
 
+如果想把“先 unbind 当前 driver，再 bind 到目标 driver”合成一步，可以用 `--rebind`：
+
+```bash
+./04_bind_unbind_static 0000:c1:00.3 --rebind vfio-pci --override --yes
+```
+
+如果设备已经是 unbound，`--rebind` 会跳过 unbind，然后继续 bind。
+
 绑定到 `vfio-pci` 时，直接写：
 
 ```bash
