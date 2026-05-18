@@ -940,11 +940,38 @@ vfio-pci vs unbound
 
 ```text
 /sys/bus/pci/devices/<BDF>/driver
+/sys/bus/pci/devices/<BDF>/driver_override
 /sys/bus/pci/drivers/<driver>/unbind
 /sys/bus/pci/drivers/<driver>/bind
 ```
 
 这个 sample 用 `--show` 查看当前绑定关系，用 `--dry-run` 预览 bind/unbind 会写哪个 sysfs 文件。真正执行必须显式传 `--yes`，因为这个操作会改变真实设备绑定状态。
+
+绑定到 `vfio-pci` 时，直接写：
+
+```bash
+./04_bind_unbind_static 0000:c1:00.3 --bind vfio-pci --yes
+```
+
+不一定能成功。原因是 `bind` 仍然要经过 driver match。`vfio-pci` 通常需要先设置这个设备的 `driver_override`：
+
+```bash
+./04_bind_unbind_static 0000:c1:00.3 --bind vfio-pci --override --yes
+```
+
+这等价于先写：
+
+```text
+vfio-pci -> /sys/bus/pci/devices/0000:c1:00.3/driver_override
+```
+
+再写：
+
+```text
+0000:c1:00.3 -> /sys/bus/pci/drivers/vfio-pci/bind
+```
+
+如果仍然失败，要看 `dmesg`，常见原因包括 VFIO/IOMMU 没准备好、IOMMU group 不满足隔离要求、设备还被其他组件占用，或者 driver probe 失败。
 
 更后面再进入：
 

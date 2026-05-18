@@ -8,11 +8,14 @@
 // exposes this relationship in sysfs:
 //
 //   /sys/bus/pci/devices/<BDF>/driver  -> symlink to current driver
+//   /sys/bus/pci/devices/<BDF>/driver_override
 //   /sys/bus/pci/drivers/<driver>/bind
 //   /sys/bus/pci/drivers/<driver>/unbind
 //
 // Writing a BDF to unbind removes the device from its current driver.
-// Writing a BDF to bind asks a driver to claim that device.
+// Writing a BDF to bind asks a driver to claim that device.  The bind
+// operation still has to match the driver.  For vfio-pci, driver_override
+// is the usual way to say "bind this exact device to vfio-pci".
 //
 // Safety note
 // ───────────
@@ -26,16 +29,21 @@
 // - PCI driver ownership
 // - sysfs driver symlinks
 // - bind/unbind control files
+// - driver_override for explicit driver matching
 // - dry-run before dangerous hardware operations
 
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <fcntl.h>
 #include <iostream>
 #include <print>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -50,11 +58,11 @@ static void usage(const char *argv0) {
                "Usage:\n"
                "  {} <BDF> --show\n"
                "  {} <BDF> --unbind [--dry-run|--yes]\n"
-               "  {} <BDF> --bind <driver> [--dry-run|--yes]\n\n"
+               "  {} <BDF> --bind <driver> [--override] [--dry-run|--yes]\n\n"
                "Examples:\n"
                "  {} c1:02.7 --show\n"
                "  {} c1:02.7 --unbind --dry-run\n"
-               "  {} c1:02.7 --bind vfio-pci --dry-run",
+               "  {} c1:02.7 --bind vfio-pci --override --dry-run",
                argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
@@ -83,6 +91,27 @@ static DriverInfo current_driver(const fs::path &dev_dir) {
   return info;
 }
 
+static std::string read_first_line(const fs::path &path) {
+  std::ifstream in(path);
+  if (!in)
+    return {};
+
+  std::string line;
+  std::getline(in, line);
+  return line;
+}
+
+static std::string current_driver_override(const fs::path &dev_dir) {
+  fs::path override_file = dev_dir / "driver_override";
+  if (!fs::exists(override_file))
+    return "<unsupported>";
+
+  std::string value = read_first_line(override_file);
+  if (value.empty() || value == "(null)")
+    return "<none>";
+  return value;
+}
+
 static void show_device(const std::string &bdf, const fs::path &dev_dir) {
   DriverInfo driver = current_driver(dev_dir);
 
@@ -91,29 +120,82 @@ static void show_device(const std::string &bdf, const fs::path &dev_dir) {
   std::println("driver: {}", driver.name);
   if (driver.bound)
     std::println("driver path: {}", driver.path.string());
+  std::println("driver_override: {}", current_driver_override(dev_dir));
 }
 
-static void write_bdf(const fs::path &control_file, const std::string &bdf) {
-  std::ofstream out(control_file);
-  if (!out)
-    throw std::runtime_error("cannot open " + control_file.string());
-
-  out << bdf;
-  if (!out)
-    throw std::runtime_error("cannot write " + bdf + " to " +
-                             control_file.string());
+static std::string errno_text(int error) {
+  return std::strerror(error);
 }
 
-static void maybe_write_bdf(const fs::path &control_file, const std::string &bdf,
-                            bool yes) {
+static void write_text(const fs::path &control_file, const std::string &value) {
+  int fd = ::open(control_file.c_str(), O_WRONLY | O_CLOEXEC);
+  if (fd == -1) {
+    int error = errno;
+    throw std::runtime_error("cannot open " + control_file.string() + ": " +
+                             errno_text(error));
+  }
+
+  ssize_t written = ::write(fd, value.data(), value.size());
+  if (written == -1) {
+    int error = errno;
+    ::close(fd);
+    throw std::runtime_error("cannot write to " + control_file.string() +
+                             ": " + errno_text(error));
+  }
+
+  if (static_cast<std::size_t>(written) != value.size()) {
+    ::close(fd);
+    throw std::runtime_error("short write to " + control_file.string());
+  }
+
+  if (::close(fd) == -1) {
+    int error = errno;
+    throw std::runtime_error("cannot close " + control_file.string() + ": " +
+                             errno_text(error));
+  }
+}
+
+static void maybe_write_value(const fs::path &control_file,
+                              const std::string &value, bool yes) {
   if (!yes) {
-    std::println("Would write \"{}\" to {}", bdf, control_file.string());
-    std::println("Pass --yes to perform this operation.");
+    std::println("Would write \"{}\" to {}", value, control_file.string());
     return;
   }
 
-  write_bdf(control_file, bdf);
-  std::println("Wrote \"{}\" to {}", bdf, control_file.string());
+  write_text(control_file, value + "\n");
+  std::println("Wrote \"{}\" to {}", value, control_file.string());
+}
+
+static void verify_unbound(const std::string &bdf, const fs::path &dev_dir) {
+  DriverInfo driver = current_driver(dev_dir);
+  if (driver.bound) {
+    throw std::runtime_error(bdf + " is still bound to " + driver.name);
+  }
+
+  std::println("{} is now unbound", bdf);
+}
+
+static void verify_bound(const std::string &bdf, const fs::path &dev_dir,
+                         const std::string &target_driver,
+                         bool used_override) {
+  DriverInfo driver = current_driver(dev_dir);
+  if (driver.bound && driver.name == target_driver) {
+    std::println("{} is now bound to {}", bdf, target_driver);
+    return;
+  }
+
+  std::string current =
+      driver.bound ? "bound to " + driver.name : std::string("unbound");
+  std::string message =
+      bdf + " is still " + current + " after bind attempt";
+  if (!used_override) {
+    message +=
+        "; the driver may not match this PCI ID. For vfio-pci, retry with "
+        "--override or register the ID with new_id.";
+  } else {
+    message += "; check dmesg for vfio/IOMMU/probe errors.";
+  }
+  throw std::runtime_error(message);
 }
 
 int main(int argc, char *argv[]) {
@@ -134,6 +216,7 @@ int main(int argc, char *argv[]) {
   bool show = false;
   bool unbind = false;
   bool yes = false;
+  bool use_override = false;
   std::string bind_driver;
 
   for (int i = 2; i < argc; ++i) {
@@ -144,6 +227,8 @@ int main(int argc, char *argv[]) {
       unbind = true;
     } else if (arg == "--bind" && i + 1 < argc) {
       bind_driver = argv[++i];
+    } else if (arg == "--override") {
+      use_override = true;
     } else if (arg == "--dry-run") {
       yes = false;
     } else if (arg == "--yes") {
@@ -160,6 +245,10 @@ int main(int argc, char *argv[]) {
     usage(argv[0]);
     return 1;
   }
+  if (use_override && bind_driver.empty()) {
+    usage(argv[0]);
+    return 1;
+  }
 
   try {
     if (show) {
@@ -173,7 +262,11 @@ int main(int argc, char *argv[]) {
         std::println("{} is already unbound", bdf);
         return 0;
       }
-      maybe_write_bdf(driver.path / "unbind", bdf, yes);
+      maybe_write_value(driver.path / "unbind", bdf, yes);
+      if (yes)
+        verify_unbound(bdf, dev_dir);
+      else
+        std::println("Pass --yes to perform this operation.");
       return 0;
     }
 
@@ -183,7 +276,13 @@ int main(int argc, char *argv[]) {
       return 1;
     }
 
-    maybe_write_bdf(driver_dir / "bind", bdf, yes);
+    if (use_override)
+      maybe_write_value(dev_dir / "driver_override", bind_driver, yes);
+    maybe_write_value(driver_dir / "bind", bdf, yes);
+    if (yes)
+      verify_bound(bdf, dev_dir, bind_driver, use_override);
+    else
+      std::println("Pass --yes to perform this operation.");
     return 0;
 
   } catch (const std::exception &e) {
