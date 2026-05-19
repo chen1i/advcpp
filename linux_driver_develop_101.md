@@ -10,6 +10,7 @@
 03_mmio.cpp           mmap memory BAR，读取设备寄存器
 04_bind_unbind.cpp    手动控制 PCI device 的 driver bind/unbind
 05_sriov_vfs.cpp      创建/销毁 SR-IOV VF，控制 VF 是否自动绑定 driver
+06_vfio_info.cpp      通过 VFIO API 查看 vfio-pci 设备的 regions/IRQs
 ```
 
 ## 1. Driver 开发的基本路线
@@ -1066,7 +1067,101 @@ PF driver = vfio-pci 时，通常不能创建 VF
 PF 绑定 vendor driver -> 创建 VF -> VF 按需绑定 vfio-pci
 ```
 
-## 14. 最小心智模型
+## 14. Sample 06: VFIO Device Info
+
+文件：
+
+```text
+userspace_drivers/06_vfio_info.cpp
+```
+
+当设备已经绑定到 `vfio-pci` 后，userspace 不应该再把主要访问路径建立在：
+
+```text
+/sys/bus/pci/devices/<BDF>/resourceN
+```
+
+正确入口变成：
+
+```text
+/dev/vfio/vfio
+/dev/vfio/<iommu_group_id>
+```
+
+运行：
+
+```bash
+./06_vfio_info_static 0000:c1:00.3 --show
+```
+
+这个 sample 做的是只读查询：
+
+```text
+1. 找到 /sys/bus/pci/devices/<BDF>/iommu_group
+2. 打开 /dev/vfio/vfio
+3. 检查 VFIO API version
+4. 检查 VFIO_TYPE1_IOMMU / VFIO_TYPE1v2_IOMMU
+5. 打开 /dev/vfio/<group_id>
+6. 检查 group 是否 viable
+7. 把 group attach 到 container
+8. 设置 container IOMMU type
+9. 获取 device fd
+10. 打印 device info
+11. 打印 region info
+12. 打印 IRQ info
+```
+
+VFIO 里最重要的三个对象：
+
+```text
+container = 一个 VFIO 地址空间/IOMMU 上下文
+group     = IOMMU 隔离单位，同组设备必须一起安全处理
+device    = 具体的 vfio-pci 设备 fd
+```
+
+`group viable` 是一个关键检查。它大致表示：
+
+```text
+这个 IOMMU group 里的设备都处在 VFIO 认为安全的状态
+```
+
+如果 group 不 viable，常见原因是同一个 IOMMU group 里还有设备绑定在普通 kernel driver 上。`06_vfio_info` 会打印 group 里的设备和当前 driver，方便排查。
+
+region 对应的是设备暴露给 userspace 的地址空间：
+
+```text
+BAR0..BAR5 = PCI BAR
+ROM        = PCI ROM region
+CONFIG     = PCI config space
+VGA        = legacy VGA region
+```
+
+`num_regions` 表示可以尝试查询的最大 region index + 1，但不代表每个 index 对当前设备都一定可用。比如非 VGA 设备查询 `VFIO_PCI_VGA_REGION_INDEX` 时可能返回 `EINVAL`，这不是 VFIO 初始化失败，只表示这个 legacy VGA region 对该设备不可用。
+
+region flags 里常见字段：
+
+```text
+READ   = 支持 read/pread
+WRITE  = 支持 write/pwrite
+MMAP   = 支持 mmap
+CAPS   = 有额外 capability 信息，例如 sparse mmap
+```
+
+这也解释了之前的现象：
+
+```text
+driver=vfio-pci 时，sysfs resourceN mmap 可能失败
+```
+
+因为设备已经交给 VFIO 管理，后续应该通过 VFIO device fd 和 VFIO region offset 来 mmap BAR。下一步可以做：
+
+```text
+07_vfio_region_dump.cpp
+```
+
+用 VFIO mmap region，替代 `03_mmio.cpp` 的 sysfs resource mmap。
+
+## 15. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
