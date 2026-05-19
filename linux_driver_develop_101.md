@@ -1,6 +1,6 @@
 # Linux Driver Development 101
 
-这份笔记记录 `userspace_drivers/` 前三个例子背后的知识点。它不是项目构建说明，而是学习 Linux PCI / userspace driver / MMIO 时的备忘录。
+这份笔记记录 `userspace_drivers/` 例子背后的知识点。它不是项目构建说明，而是学习 Linux PCI / userspace driver / MMIO 时的备忘录。
 
 当前学习路线：
 
@@ -8,6 +8,8 @@
 01_pci_enum.cpp       发现 PCI 设备，读取 sysfs 中的设备信息
 02_config_space.cpp   读取 PCI config space，理解标准 PCI header 和 capability
 03_mmio.cpp           mmap memory BAR，读取设备寄存器
+04_bind_unbind.cpp    手动控制 PCI device 的 driver bind/unbind
+05_sriov_vfs.cpp      创建/销毁 SR-IOV VF，控制 VF 是否自动绑定 driver
 ```
 
 ## 1. Driver 开发的基本路线
@@ -992,7 +994,79 @@ DMA rings
 IOMMU
 ```
 
-## 13. 最小心智模型
+## 13. Sample 05: SR-IOV VF Control
+
+文件：
+
+```text
+userspace_drivers/05_sriov_vfs.cpp
+```
+
+SR-IOV 里通常有两类 function：
+
+```text
+PF = Physical Function，真实物理功能，负责管理 VF
+VF = Virtual Function，给 VM、VFIO、DPDK 或普通 kernel driver 使用的轻量功能
+```
+
+支持 SR-IOV 的 PF 会暴露：
+
+```text
+/sys/bus/pci/devices/<PF_BDF>/sriov_totalvfs
+/sys/bus/pci/devices/<PF_BDF>/sriov_numvfs
+/sys/bus/pci/devices/<PF_BDF>/sriov_drivers_autoprobe
+/sys/bus/pci/devices/<PF_BDF>/virtfn<N>
+```
+
+常用命令：
+
+```bash
+./05_sriov_vfs_static 0000:c1:00.0 --show
+./05_sriov_vfs_static 0000:c1:00.0 --set-autoprobe 0 --yes
+./05_sriov_vfs_static 0000:c1:00.0 --create 4 --yes
+./05_sriov_vfs_static 0000:c1:00.0 --destroy --yes
+```
+
+`sriov_drivers_autoprobe` 控制的是“新创建 VF 时，kernel 是否自动 probe 并绑定匹配 driver”：
+
+```text
+1 = 创建 VF 后自动找 driver
+0 = 创建 VF 后不自动绑定，VF 通常保持 unbound
+```
+
+如果目标是把 VF 交给 `vfio-pci`，常见流程是：
+
+```bash
+./05_sriov_vfs_static 0000:c1:00.0 --destroy --yes
+./05_sriov_vfs_static 0000:c1:00.0 --set-autoprobe 0 --yes
+./05_sriov_vfs_static 0000:c1:00.0 --create 4 --yes
+./05_sriov_vfs_static 0000:c1:00.0 --show
+./04_bind_unbind_static 0000:c1:00.3 --bind vfio-pci --override --yes
+```
+
+这个顺序的关键点：
+
+```text
+PF 要先绑定在 vendor PF driver 上，不能先把 PF 绑到 vfio-pci
+sriov_drivers_autoprobe 要在 create VF 之前设置
+改变 autoprobe 前要求 sriov_numvfs=0
+create 时要求 sriov_numvfs=0
+destroy 会删除现有 VF，可能影响 VM、VFIO、DPDK、网络配置
+```
+
+你测试到的现象是正确的：
+
+```text
+PF driver = vfio-pci 时，通常不能创建 VF
+```
+
+原因是 VF 创建不是单纯 PCI core 自己完成的动作。它需要 PF driver 参与设备相关的 SR-IOV 初始化。`vfio-pci` 是通用 passthrough driver，不负责这个设备的 PF 管理逻辑。正确模型是：
+
+```text
+PF 绑定 vendor driver -> 创建 VF -> VF 按需绑定 vfio-pci
+```
+
+## 14. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
