@@ -11,6 +11,7 @@
 04_bind_unbind.cpp    手动控制 PCI device 的 driver bind/unbind
 05_sriov_vfs.cpp      创建/销毁 SR-IOV VF，控制 VF 是否自动绑定 driver
 06_vfio_info.cpp      通过 VFIO API 查看 vfio-pci 设备的 regions/IRQs
+07_vfio_region_dump.cpp  通过 VFIO mmap region 并读取 BAR 内容
 ```
 
 ## 1. Driver 开发的基本路线
@@ -1161,7 +1162,76 @@ driver=vfio-pci 时，sysfs resourceN mmap 可能失败
 
 用 VFIO mmap region，替代 `03_mmio.cpp` 的 sysfs resource mmap。
 
-## 15. 最小心智模型
+## 15. Sample 07: VFIO Region Dump
+
+文件：
+
+```text
+userspace_drivers/07_vfio_region_dump.cpp
+```
+
+`03_mmio.cpp` 的访问路径是：
+
+```text
+/sys/bus/pci/devices/<BDF>/resourceN
+```
+
+这适合未绑定普通 kernel driver、或者没有交给 `vfio-pci` 的设备。设备绑定到 `vfio-pci` 后，应该走：
+
+```text
+VFIO device fd + VFIO region offset
+```
+
+运行：
+
+```bash
+./07_vfio_region_dump_static 0000:c1:00.3 4 0 64
+```
+
+参数含义：
+
+```text
+0000:c1:00.3 = BDF
+4             = VFIO region index，也就是 BAR4
+0             = region 内偏移
+64            = dump 长度
+```
+
+它做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 查询 region info
+4. 确认 region size 非 0
+5. 确认 region 有 VFIO_REGION_INFO_FLAG_MMAP
+6. 如果 region 有 sparse mmap capability，确认请求范围在可 mmap area 内
+7. 把 region-relative offset 做 page align
+8. mmap device fd 的 region.offset + aligned_offset
+9. 用 volatile read8 做 hexdump
+```
+
+你在 sample 06 看到：
+
+```text
+region 4 (BAR4)
+  size: 0x8000
+  offset: 0x40000000000
+  flags: READ|WRITE|MMAP|CAPS
+```
+
+所以 BAR4 可以用 sample 07 读取。后续如果要写 register，需要单独加显式写接口和更强的安全限制；现在这个 sample 只读。
+
+`CAPS` 里可能包含 sparse mmap 信息。含义是：
+
+```text
+不是整个 region 都保证可以 mmap
+只能 mmap capability 列出的部分 offset/size
+```
+
+这常见于 BAR 里混有 MSI-X table 或其它不应该直接 mmap 的区域。sample 07 会解析这个 capability，避免 mmap 到不可映射的子范围。
+
+## 16. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
