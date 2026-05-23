@@ -12,6 +12,7 @@
 05_sriov_vfs.cpp      创建/销毁 SR-IOV VF，控制 VF 是否自动绑定 driver
 06_vfio_info.cpp      通过 VFIO API 查看 vfio-pci 设备的 regions/IRQs
 07_vfio_region_dump.cpp  通过 VFIO mmap region 并读取 BAR 内容
+08_vfio_dma_map.cpp   把 userspace buffer 映射到 VFIO IOMMU IOVA
 ```
 
 ## 1. Driver 开发的基本路线
@@ -1247,7 +1248,85 @@ region 4 (BAR4)
 
 这常见于 BAR 里混有 MSI-X table 或其它不应该直接 mmap 的区域。sample 07 会解析这个 capability，避免 mmap 到不可映射的子范围。
 
-## 16. 最小心智模型
+## 16. Sample 08: VFIO DMA Map / Unmap
+
+文件：
+
+```text
+userspace_drivers/08_vfio_dma_map.cpp
+```
+
+设备做 DMA 时不会使用你的 userspace virtual address。设备看到的是 IOVA：
+
+```text
+userspace virtual address -> VFIO_IOMMU_MAP_DMA -> IOVA
+```
+
+运行 dry-run：
+
+```bash
+./08_vfio_dma_map_static 0000:c1:00.3
+```
+
+真正做一次 map/unmap 测试：
+
+```bash
+./08_vfio_dma_map_static 0000:c1:00.3 0x100000000 4096 --yes
+```
+
+参数含义：
+
+```text
+0000:c1:00.3 = BDF
+0x100000000  = IOVA，也就是设备侧将来看到的地址
+4096         = buffer size，会按 page size 向上取整
+--yes        = 真的调用 VFIO_IOMMU_MAP_DMA / VFIO_IOMMU_UNMAP_DMA
+```
+
+这个 sample 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 设置 VFIO Type1 IOMMU
+4. 查询 VFIO_IOMMU_GET_INFO
+5. mmap 一块匿名 userspace buffer
+6. 填入简单 pattern
+7. VFIO_IOMMU_MAP_DMA，把 buffer 映射到 IOVA
+8. VFIO_IOMMU_UNMAP_DMA，立刻解除映射
+```
+
+这个 sample 不会：
+
+```text
+写 BAR register
+告诉设备这个 IOVA
+启动 device DMA
+```
+
+所以它只是练习 IOMMU 映射流程。真正让设备 DMA 还需要后续步骤：
+
+```text
+把 IOVA 写进设备 descriptor / queue / register
+启动设备队列
+处理中断或 polling completion
+```
+
+`VFIO_DMA_MAP_FLAG_READ` 和 `VFIO_DMA_MAP_FLAG_WRITE` 是从设备视角说的：
+
+```text
+READ  = device 可以读 host memory
+WRITE = device 可以写 host memory
+```
+
+默认 sample 使用 `READ|WRITE`。也可以显式指定：
+
+```bash
+./08_vfio_dma_map_static 0000:c1:00.3 0x100000000 4096 --read --yes
+./08_vfio_dma_map_static 0000:c1:00.3 0x100000000 4096 --read --write --yes
+```
+
+## 17. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
