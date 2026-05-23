@@ -1056,6 +1056,22 @@ create 时要求 sriov_numvfs=0
 destroy 会删除现有 VF，可能影响 VM、VFIO、DPDK、网络配置
 ```
 
+virtio-net PF 还有一个容易踩的坑：
+
+```text
+PF PCI driver = virtio-pci 还不够
+virtio child device 需要先绑定 virtio_net，让设备进入 DRIVER_OK
+否则写 sriov_numvfs 可能返回 EBUSY，即使 sriov_numvfs=0 且没有 virtfn<N>
+```
+
+遇到这种情况先加载 `virtio_net`，再创建 VF：
+
+```bash
+modprobe virtio_net
+./05_sriov_vfs_static 0000:c1:00.0 --set-autoprobe 0 --yes
+./05_sriov_vfs_static 0000:c1:00.0 --create 4 --yes
+```
+
 你测试到的现象是正确的：
 
 ```text

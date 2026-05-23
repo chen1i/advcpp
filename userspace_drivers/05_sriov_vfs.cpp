@@ -19,6 +19,11 @@
 // vendor driver while creating VFs; bind the VFs to vfio-pci afterwards if
 // that is your target.
 //
+// Gotcha: virtio-net PFs need the virtio_net driver loaded before creating
+// VFs.  The virtio-pci SR-IOV path returns EBUSY until the virtio child
+// device reaches DRIVER_OK, so sriov_numvfs can fail even when it is 0 and no
+// virtfn<N> links exist yet.
+//
 // Safety note
 // -----------
 // Creating or destroying VFs changes real host hardware state.  Destroying
