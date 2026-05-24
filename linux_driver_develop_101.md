@@ -24,6 +24,7 @@
 17_virtio_vfio_queue_enable.cpp  写 queue_enable=1 但不 notify / DRIVER_OK
 18_virtio_vfio_notify_info.cpp  解析 NOTIFY_CFG 并计算 queue notify MMIO offset
 19_virtio_vfio_notify_write.cpp  写一次 queue notify 但不 DRIVER_OK
+20_virtio_vfio_driver_ok.cpp  写 DRIVER_OK，启动空 queue 后 reset 清理
 ```
 
 ## Contents
@@ -55,7 +56,8 @@
 - [25. Sample 17: Enable one virtio queue through VFIO](#25-sample-17-enable-one-virtio-queue-through-vfio)
 - [26. Sample 18: Virtio notify information through VFIO](#26-sample-18-virtio-notify-information-through-vfio)
 - [27. Sample 19: Write one virtio queue notify through VFIO](#27-sample-19-write-one-virtio-queue-notify-through-vfio)
-- [28. 最小心智模型](#28-最小心智模型)
+- [28. Sample 20: Set virtio DRIVER_OK through VFIO](#28-sample-20-set-virtio-driver_ok-through-vfio)
+- [29. 最小心智模型](#29-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1994,7 +1996,89 @@ write16(notify_addr, queue_index)
 因为本 sample 没有协商 `VIRTIO_F_NOTIFICATION_DATA`，notify value 使用 queue
 index。即使 kernel header 暴露了 `queue_notify_data`，这里只把它作为候选值打印。
 
-## 28. 最小心智模型
+## 28. Sample 20: Set virtio DRIVER_OK through VFIO
+
+文件：
+
+```text
+userspace_drivers/20_virtio_vfio_driver_ok.cpp
+```
+
+sample 20 第一次写 `DRIVER_OK`。这意味着 device 可以开始正常运行，所以本 sample
+仍然保持 queue 为空：
+
+```text
+avail.idx = 0
+没有 descriptor
+不 notify queue
+```
+
+运行：
+
+```bash
+./20_virtio_vfio_driver_ok_static 0000:c1:00.6 --queue 0
+./20_virtio_vfio_driver_ok_static 0000:c1:00.6 --queue 0 --yes
+./20_virtio_vfio_driver_ok_static 0000:c1:00.6 --queue 0 --queue-size 128 --iova 0x200000000 --wait-ms 500 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. reset device
+2. 写 ACKNOWLEDGE、DRIVER
+3. 协商最小 feature set，并确认 FEATURES_OK
+4. 写 queue_select=N
+5. 配置 split vring DMA，并写 queue_size/desc/avail/used
+6. 写 queue_enable=1
+7. 写 DRIVER_OK
+8. 等待 --wait-ms，读回 device_status
+9. 恢复原始 queue_select
+10. reset device，清掉 enabled queue 和 queue 地址
+11. VFIO_IOMMU_UNMAP_DMA
+```
+
+这个 sample 不会：
+
+```text
+提交 available descriptor
+notify queue
+提供 packet buffer
+```
+
+注意：`DRIVER_OK` 后 device 已经可以读取 virtqueue 元数据，因此 vring DMA memory
+必须一直保持映射，直到 reset 完成。
+
+### 28.1 Gotcha: DRIVER_OK 后出现 NEEDS_RESET
+
+这个 sample 可能看到：
+
+```text
+after DRIVER_OK: 0x0f (ACKNOWLEDGE|DRIVER|DRIVER_OK|FEATURES_OK)
+after wait: 0x4f (ACKNOWLEDGE|DRIVER|DRIVER_OK|FEATURES_OK|NEEDS_RESET)
+```
+
+这不表示 VFIO mmap 或 queue register 写入失败。它表示 device 在 `DRIVER_OK`
+之后发现当前 driver setup 不足以继续运行。
+
+本 sample 故意只启用一个空 queue：
+
+```text
+没有 RX buffer
+没有 TX descriptor
+没有 notify queue
+没有完整的 virtio-net queue pair
+```
+
+对 virtio-net 来说，这种最小状态很可能触发 `NEEDS_RESET`。这个现象正好说明：
+
+```text
+DRIVER_OK 是真正进入 device runtime 的边界。
+```
+
+所以 sample 20 的定位是演示 `DRIVER_OK` 状态边界，而不是一个可持续运行的
+virtio-net userspace driver。
+
+## 29. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
