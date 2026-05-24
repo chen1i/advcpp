@@ -27,6 +27,7 @@
 20_virtio_vfio_driver_ok.cpp  写 DRIVER_OK，启动空 queue 后 reset 清理
 21_virtio_net_rx_buffers.cpp  配置 RX/TX queue pair，发布 RX buffer 并观察 used ring
 22_virtio_net_rx_observe.cpp  等待 RX used ring，dump 收到的 RX buffer 前缀
+23_virtio_net_tx_packet.cpp  发布 TX descriptor，发送一帧并观察 TX completion
 ```
 
 ## Contents
@@ -61,7 +62,8 @@
 - [28. Sample 20: Set virtio DRIVER_OK through VFIO](#28-sample-20-set-virtio-driver_ok-through-vfio)
 - [29. Sample 21: Post virtio-net RX buffers through VFIO](#29-sample-21-post-virtio-net-rx-buffers-through-vfio)
 - [30. Sample 22: Observe virtio-net RX packets through VFIO](#30-sample-22-observe-virtio-net-rx-packets-through-vfio)
-- [31. 最小心智模型](#31-最小心智模型)
+- [31. Sample 23: Send virtio-net TX packet through VFIO](#31-sample-23-send-virtio-net-tx-packet-through-vfio)
+- [32. 最小心智模型](#32-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2236,7 +2238,61 @@ num_buffers
 它的定位是证明：userspace 已经可以让 virtio-net device DMA 写入 packet buffer，并从
 used ring 取回完成信息。
 
-## 31. 最小心智模型
+## 31. Sample 23: Send virtio-net TX packet through VFIO
+
+文件：
+
+```text
+userspace_drivers/23_virtio_net_tx_packet.cpp
+```
+
+sample 23 走 TX 方向：userspace 构造一个 modern virtio-net TX header 加 Ethernet
+frame，把它作为 device-readable descriptor 放进 TX queue，然后 notify TX 并等待 TX
+used ring completion。
+
+运行：
+
+```bash
+./23_virtio_net_tx_packet_static 0000:c1:00.6
+./23_virtio_net_tx_packet_static 0000:c1:00.6 --dst-mac fe:bf:30:01:30:01 --wait-ms 5000 --yes
+./23_virtio_net_tx_packet_static 0000:c1:00.6 --ethertype 0x88b5 --payload-hex 00112233445566778899 --yes
+```
+
+默认行为：
+
+```text
+src-mac   = virtio-net DEVICE_CFG 里的 MAC
+dst-mac   = ff:ff:ff:ff:ff:ff
+ethertype = 0x88b5
+payload   = 内置 vfio-tx-test payload
+```
+
+`--yes` 做的事情：
+
+```text
+1. 打开 PCI Memory Space / Bus Master
+2. reset device
+3. 协商 feature set，并确认 FEATURES_OK
+4. 读取并打印 virtio-net device config MAC/status
+5. 发布 RX buffers，避免 device 进入不完整 queue pair 状态
+6. 构造 TX packet：12-byte virtio_net_hdr_v1 + Ethernet frame
+7. 发布一个 TX descriptor，并写 TX avail.idx=1
+8. 配置并 enable RX queue 0
+9. 配置并 enable TX queue 1
+10. 写 DRIVER_OK
+11. notify RX queue
+12. notify TX queue
+13. 等待 TX used.idx 前进，最多等 --wait-ms
+14. reset device
+15. 恢复 PCI command register
+16. VFIO_IOMMU_UNMAP_DMA
+```
+
+如果 TX used ring 前进，说明 device/backend 已经读取了 TX descriptor 对应的 userspace
+DMA buffer。这个 sample 不保证对端一定收到 frame；对端接收还要看 DPU OVS 转发、MAC
+学习、VF port 状态和目标 host 的 RX path。
+
+## 32. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
