@@ -7,7 +7,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#include <linux/pci_regs.h>
 #include <linux/vfio.h>
+#include <linux/virtio_pci.h>
 #include <limits>
 #include <print>
 #include <stdexcept>
@@ -633,4 +635,246 @@ inline std::uint64_t read_config_le64_from_halves(int device_fd,
   std::uint64_t lo = read_config_le32(device_fd, config, lo_offset);
   std::uint64_t hi = read_config_le32(device_fd, config, hi_offset);
   return lo | (hi << 32);
+}
+
+struct VirtioCap {
+  std::uint8_t cfg_type = 0;
+  std::uint8_t bar = 0;
+  std::uint64_t offset = 0;
+  std::uint64_t length = 0;
+  std::uint32_t notify_off_multiplier = 0;
+};
+
+inline std::vector<VirtioCap> read_virtio_caps(int device_fd,
+                                               const ConfigRegion &config) {
+  std::uint16_t status = read_config_le16(device_fd, config, PCI_STATUS);
+  if (!(status & PCI_STATUS_CAP_LIST))
+    return {};
+
+  std::vector<VirtioCap> caps;
+  std::vector<bool> visited(256, false);
+  std::uint8_t cap = read_config_u8(device_fd, config, PCI_CAPABILITY_LIST);
+
+  for (unsigned hop = 0; cap != 0 && hop < 64; ++hop) {
+    cap &= ~0x3u;
+    if (cap < 0x40 || static_cast<std::uint64_t>(cap) + 2 > config.size)
+      break;
+    if (visited[cap])
+      break;
+    visited[cap] = true;
+
+    std::uint8_t cap_id =
+        read_config_u8(device_fd, config, cap + PCI_CAP_LIST_ID);
+    std::uint8_t next =
+        read_config_u8(device_fd, config, cap + PCI_CAP_LIST_NEXT);
+    if (cap_id == PCI_CAP_ID_VNDR) {
+      std::uint8_t cap_len = read_config_u8(device_fd, config, cap + 2);
+      if (cap_len >= sizeof(virtio_pci_cap) &&
+          static_cast<std::uint64_t>(cap) + cap_len <= config.size) {
+        VirtioCap virtio;
+        virtio.cfg_type =
+            read_config_u8(device_fd, config, cap + VIRTIO_PCI_CAP_CFG_TYPE);
+        virtio.bar =
+            read_config_u8(device_fd, config, cap + VIRTIO_PCI_CAP_BAR);
+        virtio.offset =
+            read_config_le32(device_fd, config, cap + VIRTIO_PCI_CAP_OFFSET);
+        virtio.length =
+            read_config_le32(device_fd, config, cap + VIRTIO_PCI_CAP_LENGTH);
+        if (cap_len >= sizeof(virtio_pci_cap64)) {
+          virtio.offset = read_config_le64_from_halves(
+              device_fd, config, cap + VIRTIO_PCI_CAP_OFFSET,
+              cap + sizeof(virtio_pci_cap));
+          virtio.length = read_config_le64_from_halves(
+              device_fd, config, cap + VIRTIO_PCI_CAP_LENGTH,
+              cap + sizeof(virtio_pci_cap) + sizeof(std::uint32_t));
+        }
+        if (virtio.cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG) {
+          if (cap_len < sizeof(virtio_pci_notify_cap))
+            throw std::runtime_error("NOTIFY_CFG capability is truncated");
+          virtio.notify_off_multiplier = read_config_le32(
+              device_fd, config, cap + VIRTIO_PCI_NOTIFY_CAP_MULT);
+        }
+        caps.push_back(virtio);
+      }
+    }
+    cap = next;
+  }
+  return caps;
+}
+
+inline VirtioCap find_common_cfg(const std::vector<VirtioCap> &caps) {
+  for (const VirtioCap &cap : caps) {
+    if (cap.cfg_type == VIRTIO_PCI_CAP_COMMON_CFG)
+      return cap;
+  }
+  throw std::runtime_error("virtio COMMON_CFG capability was not found");
+}
+
+inline VirtioCap find_notify_cfg(const std::vector<VirtioCap> &caps) {
+  for (const VirtioCap &cap : caps) {
+    if (cap.cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG)
+      return cap;
+  }
+  throw std::runtime_error("virtio NOTIFY_CFG capability was not found");
+}
+
+inline VirtioCap find_device_cfg(const std::vector<VirtioCap> &caps) {
+  for (const VirtioCap &cap : caps) {
+    if (cap.cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG)
+      return cap;
+  }
+  throw std::runtime_error("virtio DEVICE_CFG capability was not found");
+}
+
+inline __u32 vfio_bar_region_index(std::uint8_t bar) {
+  if (bar > 5)
+    throw std::runtime_error("virtio capability references invalid BAR " +
+                             std::to_string(bar));
+  return VFIO_PCI_BAR0_REGION_INDEX + bar;
+}
+
+inline long vfio_system_page_size() {
+  long page_size = ::sysconf(_SC_PAGESIZE);
+  if (page_size <= 0)
+    throw std::runtime_error("cannot determine system page size");
+  return page_size;
+}
+
+inline void require_mmap_area_contains(const RegionInfo &region,
+                                       std::uint64_t range_offset,
+                                       std::uint64_t range_size,
+                                       std::string_view what) {
+  if (region.mmap_areas.empty())
+    return;
+
+  for (const MmapArea &area : region.mmap_areas) {
+    if (area.contains(range_offset, range_size))
+      return;
+  }
+
+  throw std::runtime_error(std::string(what) +
+                           " is not fully inside a VFIO sparse mmap area");
+}
+
+inline MappedRegion map_common_cfg(int device_fd, const VirtioCap &common,
+                                   std::size_t &mapping_delta,
+                                   bool writable) {
+  __u32 region_index = vfio_bar_region_index(common.bar);
+  RegionInfo region = get_region_info(device_fd, region_index);
+  const vfio_region_info &info = region.info;
+
+  if (info.size == 0)
+    throw std::runtime_error("COMMON_CFG BAR region is not present");
+  if (!(info.flags & VFIO_REGION_INFO_FLAG_MMAP))
+    throw std::runtime_error("COMMON_CFG BAR region does not support mmap");
+  if (common.offset >= info.size)
+    throw std::runtime_error("COMMON_CFG offset is past BAR region size");
+  if (common.length < VIRTIO_PCI_COMMON_Q_USEDHI + sizeof(std::uint32_t))
+    throw std::runtime_error("COMMON_CFG is shorter than queue address fields");
+
+  std::uint64_t available = info.size - common.offset;
+  std::size_t common_length = static_cast<std::size_t>(
+      std::min<std::uint64_t>(common.length, available));
+  std::size_t required_length =
+      VIRTIO_PCI_COMMON_Q_USEDHI + sizeof(std::uint32_t);
+#ifdef VIRTIO_PCI_COMMON_Q_NDATA
+  required_length =
+      std::max<std::size_t>(required_length,
+                            VIRTIO_PCI_COMMON_Q_NDATA + sizeof(std::uint16_t));
+#endif
+  std::size_t inspect_length =
+      std::min<std::size_t>(common_length, required_length);
+
+  require_mmap_area_contains(region, common.offset, inspect_length,
+                             "COMMON_CFG range");
+
+  long page_size = vfio_system_page_size();
+  std::uint64_t page_mask = static_cast<std::uint64_t>(page_size - 1);
+  std::uint64_t aligned_offset = common.offset & ~page_mask;
+  mapping_delta = static_cast<std::size_t>(common.offset - aligned_offset);
+  std::size_t mapping_size = mapping_delta + inspect_length;
+  off_t mmap_offset = static_cast<off_t>(info.offset + aligned_offset);
+
+  std::println("COMMON_CFG capability:");
+  std::println("  bar: {}", common.bar);
+  std::println("  offset: 0x{:x}", common.offset);
+  std::println("  length: 0x{:x} ({})", common.length, common.length);
+  std::println("mmap file offset: 0x{:x}", mmap_offset);
+
+  return MappedRegion(device_fd, mapping_size, mmap_offset, writable);
+}
+
+inline MappedRegion map_device_cfg(int device_fd, const VirtioCap &device_cfg,
+                                   std::size_t &mapping_delta,
+                                   std::size_t required_length = 0) {
+  __u32 region_index = vfio_bar_region_index(device_cfg.bar);
+  RegionInfo region = get_region_info(device_fd, region_index);
+  const vfio_region_info &info = region.info;
+
+  if (info.size == 0)
+    throw std::runtime_error("DEVICE_CFG BAR region is not present");
+  if (!(info.flags & VFIO_REGION_INFO_FLAG_MMAP))
+    throw std::runtime_error("DEVICE_CFG BAR region does not support mmap");
+  if (device_cfg.offset >= info.size)
+    throw std::runtime_error("DEVICE_CFG offset is past BAR region size");
+  if (device_cfg.length < required_length)
+    throw std::runtime_error("DEVICE_CFG is shorter than required config");
+
+  std::uint64_t available = info.size - device_cfg.offset;
+  std::size_t inspect_length = static_cast<std::size_t>(
+      std::min<std::uint64_t>(device_cfg.length, available));
+
+  require_mmap_area_contains(region, device_cfg.offset, inspect_length,
+                             "DEVICE_CFG range");
+
+  long page_size = vfio_system_page_size();
+  std::uint64_t page_mask = static_cast<std::uint64_t>(page_size - 1);
+  std::uint64_t aligned_offset = device_cfg.offset & ~page_mask;
+  mapping_delta = static_cast<std::size_t>(device_cfg.offset - aligned_offset);
+  std::size_t mapping_size = mapping_delta + inspect_length;
+  off_t mmap_offset = static_cast<off_t>(info.offset + aligned_offset);
+
+  std::println("DEVICE_CFG capability:");
+  std::println("  bar: {}", device_cfg.bar);
+  std::println("  offset: 0x{:x}", device_cfg.offset);
+  std::println("  length: 0x{:x} ({})", device_cfg.length, device_cfg.length);
+  std::println("mmap file offset: 0x{:x}", mmap_offset);
+
+  return MappedRegion(device_fd, mapping_size, mmap_offset, false);
+}
+
+inline MappedRegion map_notify_window(int device_fd, const VirtioCap &notify,
+                                      const RegionInfo &region,
+                                      std::uint16_t queue_notify_off,
+                                      std::size_t &mapping_delta,
+                                      std::uint64_t &bar_offset,
+                                      off_t &mmap_offset) {
+  const vfio_region_info &info = region.info;
+  if (info.size == 0)
+    throw std::runtime_error("NOTIFY_CFG BAR region is not present");
+  if (!(info.flags & VFIO_REGION_INFO_FLAG_MMAP))
+    throw std::runtime_error("NOTIFY_CFG BAR region does not support mmap");
+  if (!(info.flags & VFIO_REGION_INFO_FLAG_WRITE))
+    throw std::runtime_error("NOTIFY_CFG BAR region is not writable");
+
+  bar_offset =
+      notify.offset + static_cast<std::uint64_t>(queue_notify_off) *
+                          notify.notify_off_multiplier;
+  if (bar_offset + sizeof(std::uint16_t) > info.size)
+    throw std::runtime_error("computed notify offset is past BAR region size");
+  if (bar_offset < notify.offset ||
+      bar_offset + sizeof(std::uint16_t) > notify.offset + notify.length) {
+    throw std::runtime_error("computed notify offset is outside NOTIFY_CFG");
+  }
+
+  require_mmap_area_contains(region, bar_offset, sizeof(std::uint16_t),
+                             "notify range");
+
+  long page_size = vfio_system_page_size();
+  std::uint64_t page_mask = static_cast<std::uint64_t>(page_size - 1);
+  std::uint64_t aligned_offset = bar_offset & ~page_mask;
+  mapping_delta = static_cast<std::size_t>(bar_offset - aligned_offset);
+  mmap_offset = static_cast<off_t>(info.offset + aligned_offset);
+  std::size_t mapping_size = mapping_delta + sizeof(std::uint16_t);
+  return MappedRegion(device_fd, mapping_size, mmap_offset, true);
 }
