@@ -640,6 +640,23 @@ minimal_guest_features(const std::vector<std::uint32_t> &device_features) {
   return guest;
 }
 
+inline std::vector<std::uint32_t> minimal_transport_features(
+    const std::vector<std::uint32_t> &device_features) {
+  std::vector<std::uint32_t> guest(kFeatureWords, 0);
+
+  if (!feature_is_set(device_features, VIRTIO_F_VERSION_1)) {
+    throw std::runtime_error(
+        "device does not offer VIRTIO_F_VERSION_1; this sample only supports "
+        "modern virtio");
+  }
+
+  set_feature(guest, VIRTIO_F_VERSION_1);
+  if (feature_is_set(device_features, VIRTIO_F_ACCESS_PLATFORM))
+    set_feature(guest, VIRTIO_F_ACCESS_PLATFORM);
+
+  return guest;
+}
+
 inline void write_guest_feature_words(
     MappedRegion &mapping, std::size_t mapping_delta,
     const std::vector<std::uint32_t> &words) {
@@ -689,6 +706,39 @@ negotiate_minimal_features(MappedRegion &mapping, std::size_t mapping_delta) {
     throw std::runtime_error("device rejected FEATURES_OK");
   }
   return guest_features;
+}
+
+inline void negotiate_minimal_transport_features(MappedRegion &mapping,
+                                                 std::size_t mapping_delta) {
+  reset_device(mapping, mapping_delta, "after reset");
+
+  write_status(mapping, mapping_delta, VIRTIO_CONFIG_S_ACKNOWLEDGE);
+  print_status("after ACKNOWLEDGE", read_status(mapping, mapping_delta));
+
+  write_status(mapping, mapping_delta,
+               VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
+  print_status("after DRIVER", read_status(mapping, mapping_delta));
+
+  FeatureWords device_features =
+      read_feature_words(mapping, mapping_delta, VIRTIO_PCI_COMMON_DFSELECT,
+                         VIRTIO_PCI_COMMON_DF, kFeatureWords);
+  print_feature_words("Device feature words", device_features.words);
+
+  std::vector<std::uint32_t> guest_features =
+      minimal_transport_features(device_features.words);
+  print_feature_words("Minimal guest feature words", guest_features);
+  write_guest_feature_words(mapping, mapping_delta, guest_features);
+
+  constexpr std::uint8_t features_ok_status =
+      VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER |
+      VIRTIO_CONFIG_S_FEATURES_OK;
+  write_status(mapping, mapping_delta, features_ok_status);
+
+  std::uint8_t after_features_ok = read_status(mapping, mapping_delta);
+  print_status("after FEATURES_OK", after_features_ok);
+  if (!(after_features_ok & VIRTIO_CONFIG_S_FEATURES_OK)) {
+    throw std::runtime_error("device rejected FEATURES_OK");
+  }
 }
 
 inline VringLayout compute_vring_layout(std::uint16_t queue_size,
