@@ -8,12 +8,14 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <linux/vfio.h>
+#include <limits>
 #include <print>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <vector>
 
@@ -430,4 +432,205 @@ inline void print_iommu_info(int container_fd) {
     std::println("IOMMU page-size bitmap: 0x{:x}", info.iova_pgsizes);
   else
     std::println("IOMMU page-size bitmap: <not reported>");
+}
+
+struct ConfigRegion {
+  std::uint64_t offset = 0;
+  std::uint64_t size = 0;
+};
+
+struct MmapArea {
+  std::uint64_t offset = 0;
+  std::uint64_t size = 0;
+
+  bool contains(std::uint64_t range_offset, std::uint64_t range_size) const {
+    return range_offset >= offset && range_offset - offset <= size &&
+           range_size <= size - (range_offset - offset);
+  }
+};
+
+struct RegionInfo {
+  vfio_region_info info{};
+  std::vector<MmapArea> mmap_areas;
+};
+
+inline ConfigRegion get_config_region(int device_fd) {
+  vfio_region_info region{};
+  region.argsz = sizeof(region);
+  region.index = VFIO_PCI_CONFIG_REGION_INDEX;
+  vfio_ioctl_checked(device_fd, VFIO_DEVICE_GET_REGION_INFO, &region,
+                     "VFIO_DEVICE_GET_REGION_INFO(CONFIG)");
+
+  return {.offset = region.offset, .size = region.size};
+}
+
+inline void parse_region_caps(RegionInfo &region,
+                              const std::vector<char> &buf) {
+  if (!(region.info.flags & VFIO_REGION_INFO_FLAG_CAPS))
+    return;
+
+  std::uint32_t offset = region.info.cap_offset;
+  while (offset != 0) {
+    if (offset + sizeof(vfio_info_cap_header) > buf.size())
+      throw std::runtime_error("VFIO region capability chain is truncated");
+
+    const auto *header =
+        reinterpret_cast<const vfio_info_cap_header *>(buf.data() + offset);
+
+    if (header->id == VFIO_REGION_INFO_CAP_SPARSE_MMAP) {
+      if (offset + sizeof(vfio_region_info_cap_sparse_mmap) > buf.size())
+        throw std::runtime_error("VFIO sparse mmap capability is truncated");
+
+      const auto *sparse =
+          reinterpret_cast<const vfio_region_info_cap_sparse_mmap *>(
+              buf.data() + offset);
+      std::size_t bytes =
+          sizeof(vfio_region_info_cap_sparse_mmap) +
+          static_cast<std::size_t>(sparse->nr_areas) *
+              sizeof(vfio_region_sparse_mmap_area);
+      if (offset + bytes > buf.size())
+        throw std::runtime_error("VFIO sparse mmap area list is truncated");
+
+      for (std::uint32_t i = 0; i < sparse->nr_areas; ++i) {
+        region.mmap_areas.push_back({
+            .offset = sparse->areas[i].offset,
+            .size = sparse->areas[i].size,
+        });
+      }
+    }
+
+    offset = header->next;
+  }
+}
+
+inline RegionInfo get_region_info(int device_fd, __u32 index) {
+  vfio_region_info region{};
+  region.argsz = sizeof(region);
+  region.index = index;
+  vfio_ioctl_checked(device_fd, VFIO_DEVICE_GET_REGION_INFO, &region,
+                     "VFIO_DEVICE_GET_REGION_INFO");
+
+  RegionInfo result;
+  result.info = region;
+
+  if ((region.flags & VFIO_REGION_INFO_FLAG_CAPS) &&
+      region.argsz > sizeof(vfio_region_info)) {
+    std::vector<char> buf(region.argsz);
+    auto *full = reinterpret_cast<vfio_region_info *>(buf.data());
+    full->argsz = static_cast<__u32>(buf.size());
+    full->index = index;
+    vfio_ioctl_checked(device_fd, VFIO_DEVICE_GET_REGION_INFO, full,
+                       "VFIO_DEVICE_GET_REGION_INFO");
+    result.info = *full;
+    parse_region_caps(result, buf);
+  }
+
+  return result;
+}
+
+inline void pread_exact(int fd, void *data, std::size_t size,
+                        std::uint64_t offset, std::string_view what) {
+  if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+    throw std::runtime_error(std::string(what) + ": offset too large");
+
+  auto *out = static_cast<std::uint8_t *>(data);
+  std::size_t done = 0;
+  while (done < size) {
+    ssize_t got = ::pread(fd, out + done, size - done,
+                          static_cast<off_t>(offset + done));
+    if (got == -1 && errno == EINTR)
+      continue;
+    if (got == -1) {
+      int error = errno;
+      throw std::runtime_error(std::string(what) + ": " +
+                               vfio_errno_text(error));
+    }
+    if (got == 0)
+      throw std::runtime_error(std::string(what) + ": short read");
+    done += static_cast<std::size_t>(got);
+  }
+}
+
+inline void pwrite_exact(int fd, const void *data, std::size_t size,
+                         std::uint64_t offset, std::string_view what) {
+  if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+    throw std::runtime_error(std::string(what) + ": offset too large");
+
+  const auto *in = static_cast<const std::uint8_t *>(data);
+  std::size_t done = 0;
+  while (done < size) {
+    ssize_t wrote = ::pwrite(fd, in + done, size - done,
+                             static_cast<off_t>(offset + done));
+    if (wrote == -1 && errno == EINTR)
+      continue;
+    if (wrote == -1) {
+      int error = errno;
+      throw std::runtime_error(std::string(what) + ": " +
+                               vfio_errno_text(error));
+    }
+    if (wrote == 0)
+      throw std::runtime_error(std::string(what) + ": short write");
+    done += static_cast<std::size_t>(wrote);
+  }
+}
+
+inline void read_config_bytes(int device_fd, const ConfigRegion &config,
+                              std::uint16_t offset, void *data,
+                              std::size_t size) {
+  if (static_cast<std::uint64_t>(offset) + size > config.size)
+    throw std::runtime_error("PCI config read past VFIO CONFIG region");
+  pread_exact(device_fd, data, size, config.offset + offset, "pread CONFIG");
+}
+
+inline void write_config_bytes(int device_fd, const ConfigRegion &config,
+                               std::uint16_t offset, const void *data,
+                               std::size_t size) {
+  if (static_cast<std::uint64_t>(offset) + size > config.size)
+    throw std::runtime_error("PCI config write past VFIO CONFIG region");
+  pwrite_exact(device_fd, data, size, config.offset + offset, "pwrite CONFIG");
+}
+
+inline std::uint8_t read_config_u8(int device_fd, const ConfigRegion &config,
+                                   std::uint16_t offset) {
+  std::uint8_t value = 0;
+  read_config_bytes(device_fd, config, offset, &value, sizeof(value));
+  return value;
+}
+
+inline std::uint16_t read_config_le16(int device_fd,
+                                      const ConfigRegion &config,
+                                      std::uint16_t offset) {
+  std::uint8_t bytes[2]{};
+  read_config_bytes(device_fd, config, offset, bytes, sizeof(bytes));
+  return static_cast<std::uint16_t>(bytes[0]) |
+         (static_cast<std::uint16_t>(bytes[1]) << 8);
+}
+
+inline void write_config_le16(int device_fd, const ConfigRegion &config,
+                              std::uint16_t offset, std::uint16_t value) {
+  std::uint8_t bytes[2]{
+      static_cast<std::uint8_t>(value & 0xffu),
+      static_cast<std::uint8_t>(value >> 8),
+  };
+  write_config_bytes(device_fd, config, offset, bytes, sizeof(bytes));
+}
+
+inline std::uint32_t read_config_le32(int device_fd,
+                                      const ConfigRegion &config,
+                                      std::uint16_t offset) {
+  std::uint8_t bytes[4]{};
+  read_config_bytes(device_fd, config, offset, bytes, sizeof(bytes));
+  return static_cast<std::uint32_t>(bytes[0]) |
+         (static_cast<std::uint32_t>(bytes[1]) << 8) |
+         (static_cast<std::uint32_t>(bytes[2]) << 16) |
+         (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+inline std::uint64_t read_config_le64_from_halves(int device_fd,
+                                                  const ConfigRegion &config,
+                                                  std::uint16_t lo_offset,
+                                                  std::uint16_t hi_offset) {
+  std::uint64_t lo = read_config_le32(device_fd, config, lo_offset);
+  std::uint64_t hi = read_config_le32(device_fd, config, hi_offset);
+  return lo | (hi << 32);
 }
