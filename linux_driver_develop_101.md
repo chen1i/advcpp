@@ -16,6 +16,7 @@
 09_vfio_irq_eventfd.cpp  把 VFIO interrupt 连接到 eventfd 并 poll 等待
 10_virtio_vfio_pci_caps.cpp  通过 VFIO CONFIG region 解析 virtio PCI capabilities
 11_virtio_vfio_common_cfg.cpp  mmap virtio COMMON_CFG 并读取基础状态
+12_virtio_vfio_queue_info.cpp  写 queue_select 并枚举 virtqueue 状态
 ```
 
 ## Contents
@@ -39,7 +40,8 @@
 - [17. Sample 09: VFIO IRQ eventfd](#17-sample-09-vfio-irq-eventfd)
 - [18. Sample 10: Virtio PCI capabilities through VFIO](#18-sample-10-virtio-pci-capabilities-through-vfio)
 - [19. Sample 11: Virtio common config through VFIO](#19-sample-11-virtio-common-config-through-vfio)
-- [20. 最小心智模型](#20-最小心智模型)
+- [20. Sample 12: Virtio queue info through VFIO](#20-sample-12-virtio-queue-info-through-vfio)
+- [21. 最小心智模型](#21-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1528,7 +1530,66 @@ notify device
 `queue_select`，所以它只读取设备当前 selection 对应的 queue。后续 sample
 再专门练习选择 queue、读 queue 参数、配置 vring。
 
-## 20. 最小心智模型
+## 20. Sample 12: Virtio queue info through VFIO
+
+文件：
+
+```text
+userspace_drivers/12_virtio_vfio_queue_info.cpp
+```
+
+virtio common config 里的 queue 字段是 selected-queue window：
+
+```text
+write queue_select = N
+read queue_size / queue_enable / queue_notify_off / queue_desc / queue_avail / queue_used
+```
+
+默认 dry-run 不写寄存器，只显示当前 selected queue，并说明将要写哪些 selection：
+
+```bash
+./12_virtio_vfio_queue_info_static 0000:c1:00.6 --show
+```
+
+真正枚举所有 queue：
+
+```bash
+./12_virtio_vfio_queue_info_static 0000:c1:00.6 --show --yes
+```
+
+只看单个 queue：
+
+```bash
+./12_virtio_vfio_queue_info_static 0000:c1:00.6 --show --queue 0 --yes
+```
+
+这个 sample 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 解析 virtio COMMON_CFG capability
+4. mmap COMMON_CFG 所在 BAR range
+5. 读取原始 queue_select
+6. 写 queue_select=N
+7. 读取 queue_size、queue_enable、queue_notify_off、queue 地址字段
+8. 退出前恢复原始 queue_select
+```
+
+这个 sample 不会：
+
+```text
+写 device_status
+协商 feature
+写 queue_desc / queue_avail / queue_used
+enable queue
+notify device
+启动 device DMA
+```
+
+虽然只写 `queue_select`，它仍然是设备寄存器写入，所以真实枚举需要 `--yes`。
+
+## 21. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
