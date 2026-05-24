@@ -22,6 +22,7 @@
 15_virtio_vfio_vring_map.cpp  计算 split vring 布局并用 VFIO 映射 DMA 内存
 16_virtio_vfio_queue_program.cpp  写 queue_size/desc/avail/used 但不 enable queue
 17_virtio_vfio_queue_enable.cpp  写 queue_enable=1 但不 notify / DRIVER_OK
+18_virtio_vfio_notify_info.cpp  解析 NOTIFY_CFG 并计算 queue notify MMIO offset
 ```
 
 ## Contents
@@ -51,7 +52,8 @@
 - [23. Sample 15: Virtio split vring DMA map through VFIO](#23-sample-15-virtio-split-vring-dma-map-through-vfio)
 - [24. Sample 16: Program virtio queue addresses through VFIO](#24-sample-16-program-virtio-queue-addresses-through-vfio)
 - [25. Sample 17: Enable one virtio queue through VFIO](#25-sample-17-enable-one-virtio-queue-through-vfio)
-- [26. 最小心智模型](#26-最小心智模型)
+- [26. Sample 18: Virtio notify information through VFIO](#26-sample-18-virtio-notify-information-through-vfio)
+- [27. 最小心智模型](#27-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1880,7 +1882,66 @@ notify device
 运行状态还需要后续的 `DRIVER_OK`。本 sample 退出前 reset，是为了避免 enabled
 queue 在 DMA memory 被 unmap 后仍留在设备里。
 
-## 26. 最小心智模型
+## 26. Sample 18: Virtio notify information through VFIO
+
+文件：
+
+```text
+userspace_drivers/18_virtio_vfio_notify_info.cpp
+```
+
+sample 18 不启动设备，也不写 notify register。它只回答一个问题：
+
+```text
+如果后续要 notify 某个 queue，应该写哪个 MMIO offset？
+```
+
+modern virtio PCI 的 notify 地址来自两部分：
+
+```text
+NOTIFY_CFG.offset + queue_notify_off * notify_off_multiplier
+```
+
+运行：
+
+```bash
+./18_virtio_vfio_notify_info_static 0000:c1:00.6 --show
+./18_virtio_vfio_notify_info_static 0000:c1:00.6 --show --queue 0
+./18_virtio_vfio_notify_info_static 0000:c1:00.6 --show --queue 0 --yes
+```
+
+默认 `--show` 不写寄存器，只基于当前 selected queue 计算 notify 地址。如果指定
+`--queue N` 但不加 `--yes`，程序只说明将要写 `queue_select=N`。加 `--yes` 后才会
+写 `queue_select`，读取目标 queue 的 `queue_notify_off`，计算 notify offset，然后
+恢复原始 `queue_select`。
+
+这个 sample 做的事情：
+
+```text
+1. 解析 COMMON_CFG 和 NOTIFY_CFG capabilities
+2. 读取 notify_off_multiplier
+3. mmap COMMON_CFG
+4. 读取当前 selected queue 的 queue_notify_off
+5. 可选写 queue_select=N，读取目标 queue_notify_off
+6. 计算 BAR-relative notify offset
+7. 打印 VFIO device fd file offset
+8. 恢复原始 queue_select
+```
+
+这个 sample 不会：
+
+```text
+写 notify MMIO
+写 queue_enable
+写 DRIVER_OK
+启动 device DMA
+```
+
+后续真正 notify 时，如果没有协商 `VIRTIO_F_NOTIFICATION_DATA`，通常写入 queue
+index；如果协商了 `VIRTIO_F_NOTIFICATION_DATA`，则写入 `queue_notify_data`。
+sample 18 会把这两个候选值都打印出来。
+
+## 27. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
