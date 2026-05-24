@@ -29,6 +29,7 @@
 22_virtio_net_rx_observe.cpp  等待 RX used ring，dump 收到的 RX buffer 前缀
 23_virtio_net_tx_packet.cpp  发布 TX descriptor，发送一帧并观察 TX completion
 24_virtio_net_rx_tx_echo.cpp  收到一帧后构造 reply，并通过 TX queue 回发
+25_virtio_net_echo_loop.cpp  多包 echo loop，回收 RX/TX descriptor
 ```
 
 ## Contents
@@ -65,7 +66,8 @@
 - [30. Sample 22: Observe virtio-net RX packets through VFIO](#30-sample-22-observe-virtio-net-rx-packets-through-vfio)
 - [31. Sample 23: Send virtio-net TX packet through VFIO](#31-sample-23-send-virtio-net-tx-packet-through-vfio)
 - [32. Sample 24: Echo one virtio-net RX packet through VFIO](#32-sample-24-echo-one-virtio-net-rx-packet-through-vfio)
-- [33. 最小心智模型](#33-最小心智模型)
+- [33. Sample 25: Run a small virtio-net echo loop through VFIO](#33-sample-25-run-a-small-virtio-net-echo-loop-through-vfio)
+- [34. 最小心智模型](#34-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2350,7 +2352,73 @@ TX used.idx after wait: ... (delta 1)
 它的定位是证明：userspace 已经能完成一个最小闭环：device DMA 写入 RX buffer，
 userspace 消费 RX used entry，再通过 TX queue 把 reply 交还给 device/backend。
 
-## 33. 最小心智模型
+## 33. Sample 25: Run a small virtio-net echo loop through VFIO
+
+文件：
+
+```text
+userspace_drivers/25_virtio_net_echo_loop.cpp
+```
+
+sample 25 把 sample 24 的一次性 echo 扩展成一个有边界的小 loop。它继续使用 RX queue 0
+和 TX queue 1，但会追踪 `last_rx_used_idx` / `last_tx_used_idx`，处理多个 RX used entry，
+并把完成的 RX descriptor 重新放回 RX avail ring。
+
+运行：
+
+```bash
+./25_virtio_net_echo_loop_static 0000:c1:00.6
+./25_virtio_net_echo_loop_static 0000:c1:00.6 --run-ms 60000 --max-packets 3 --yes
+./25_virtio_net_echo_loop_static 0000:c1:00.6 --tx-buffers 8 --rx-buffers 64 --yes
+./25_virtio_net_echo_loop_static 0000:c1:00.6 --max-packets 3 --dump-every-packet --yes
+```
+
+配套测试脚本：
+
+```bash
+python3 userspace_drivers/25_test_raw_echo_loop.py --count 3 --expect 3
+```
+
+默认行为：
+
+```text
+RX buffers       = 64
+TX buffers       = 8
+run-ms           = 30000
+max-packets      = 3
+match-ethertype  = 0x88b5
+dump-every-packet = false
+```
+
+loop 内部做的事情：
+
+```text
+1. poll RX used.idx，扫描新增的 RX used entries
+2. 过滤 ethertype，不匹配的 RX descriptor 也会 recycle
+3. 找一个空闲 TX descriptor
+4. 把 RX Ethernet frame 拷贝到 TX buffer，交换 src/dst MAC
+5. 发布 TX descriptor，notify TX queue
+6. 把 RX descriptor 放回 RX avail ring，notify RX queue
+7. poll TX used.idx，释放完成的 TX descriptor
+8. 到达 --max-packets 或 --run-ms 后 reset device 并 unmap DMA
+```
+
+默认只 dump 第一包，避免多包测试时刷屏。需要逐包 dump 时加
+`--dump-every-packet`。
+
+这个 sample 开始接近最小 datapath driver 的形状，但仍然有明显边界：
+
+```text
+不使用 IRQ/eventfd
+不支持多 descriptor chained packet
+不处理 checksum/offload metadata
+不实现控制队列和协议栈
+```
+
+它的定位是证明：userspace 不仅能收一包、发一包，还能维护 ring index 和 descriptor
+生命周期，持续处理一个小批量的 packet。
+
+## 34. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
