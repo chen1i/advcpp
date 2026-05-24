@@ -23,6 +23,7 @@
 16_virtio_vfio_queue_program.cpp  写 queue_size/desc/avail/used 但不 enable queue
 17_virtio_vfio_queue_enable.cpp  写 queue_enable=1 但不 notify / DRIVER_OK
 18_virtio_vfio_notify_info.cpp  解析 NOTIFY_CFG 并计算 queue notify MMIO offset
+19_virtio_vfio_notify_write.cpp  写一次 queue notify 但不 DRIVER_OK
 ```
 
 ## Contents
@@ -53,7 +54,8 @@
 - [24. Sample 16: Program virtio queue addresses through VFIO](#24-sample-16-program-virtio-queue-addresses-through-vfio)
 - [25. Sample 17: Enable one virtio queue through VFIO](#25-sample-17-enable-one-virtio-queue-through-vfio)
 - [26. Sample 18: Virtio notify information through VFIO](#26-sample-18-virtio-notify-information-through-vfio)
-- [27. 最小心智模型](#27-最小心智模型)
+- [27. Sample 19: Write one virtio queue notify through VFIO](#27-sample-19-write-one-virtio-queue-notify-through-vfio)
+- [28. 最小心智模型](#28-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1941,7 +1943,58 @@ NOTIFY_CFG.offset + queue_notify_off * notify_off_multiplier
 index；如果协商了 `VIRTIO_F_NOTIFICATION_DATA`，则写入 `queue_notify_data`。
 sample 18 会把这两个候选值都打印出来。
 
-## 27. 最小心智模型
+## 27. Sample 19: Write one virtio queue notify through VFIO
+
+文件：
+
+```text
+userspace_drivers/19_virtio_vfio_notify_write.cpp
+```
+
+sample 19 在 sample 17/18 的基础上写一次真正的 notify MMIO：
+
+```text
+notify_addr = NOTIFY_CFG.offset + queue_notify_off * notify_off_multiplier
+write16(notify_addr, queue_index)
+```
+
+运行：
+
+```bash
+./19_virtio_vfio_notify_write_static 0000:c1:00.6 --queue 0
+./19_virtio_vfio_notify_write_static 0000:c1:00.6 --queue 0 --yes
+./19_virtio_vfio_notify_write_static 0000:c1:00.6 --queue 0 --queue-size 128 --iova 0x200000000 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. reset device
+2. 写 ACKNOWLEDGE、DRIVER
+3. 协商最小 feature set，并确认 FEATURES_OK
+4. 写 queue_select=N
+5. 配置 split vring DMA，并写 queue_size/desc/avail/used
+6. 写 queue_enable=1
+7. 解析 NOTIFY_CFG，计算目标 notify MMIO offset
+8. mmap notify MMIO window
+9. 写一个 16-bit notify value
+10. 恢复原始 queue_select
+11. reset device，清掉 enabled queue 和 queue 地址
+12. VFIO_IOMMU_UNMAP_DMA
+```
+
+这个 sample 不会：
+
+```text
+写 DRIVER_OK
+启动正常 device operation
+提交任何 available descriptor
+```
+
+因为本 sample 没有协商 `VIRTIO_F_NOTIFICATION_DATA`，notify value 使用 queue
+index。即使 kernel header 暴露了 `queue_notify_data`，这里只把它作为候选值打印。
+
+## 28. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
