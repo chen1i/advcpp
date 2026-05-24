@@ -14,6 +14,7 @@
 07_vfio_region_dump.cpp  通过 VFIO mmap region 并读取 BAR 内容
 08_vfio_dma_map.cpp   把 userspace buffer 映射到 VFIO IOMMU IOVA
 09_vfio_irq_eventfd.cpp  把 VFIO interrupt 连接到 eventfd 并 poll 等待
+10_virtio_vfio_pci_caps.cpp  通过 VFIO CONFIG region 解析 virtio PCI capabilities
 ```
 
 ## 1. Driver 开发的基本路线
@@ -1405,7 +1406,63 @@ fuser -v /dev/vfio/87
 lsof /dev/vfio/87
 ```
 
-## 18. 最小心智模型
+## 18. Sample 10: Virtio PCI capabilities through VFIO
+
+文件：
+
+```text
+userspace_drivers/10_virtio_vfio_pci_caps.cpp
+```
+
+modern virtio PCI 设备会在 PCI config space 里放 vendor capability。这些
+capability 不是寄存器本身，而是“地图”：告诉 driver `common_cfg`、
+`notify_cfg`、`isr_cfg`、`device_cfg` 等结构在哪个 BAR、哪个 offset。
+
+运行：
+
+```bash
+./10_virtio_vfio_pci_caps_static 0000:c1:00.6 --show
+```
+
+这个 sample 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 查询 VFIO PCI CONFIG region
+4. 通过 VFIO device fd pread PCI config space
+5. 从 PCI_CAPABILITY_LIST 开始遍历 capability list
+6. 找 PCI_CAP_ID_VNDR 的 virtio capability
+7. 打印 cfg_type、bar、offset、length
+8. 对 NOTIFY_CFG 额外打印 notify_off_multiplier
+```
+
+常见 virtio cfg_type：
+
+```text
+1 = COMMON_CFG
+2 = NOTIFY_CFG
+3 = ISR_CFG
+4 = DEVICE_CFG
+5 = PCI_CFG
+8 = SHM_CFG
+9 = VENDOR_CFG
+```
+
+这个 sample 不会：
+
+```text
+mmap BAR
+写 common_cfg
+reset device
+enable queue
+启动 device DMA
+```
+
+它的作用是先把 virtio register map 找出来。后续 sample 再基于这些
+BAR/offset 去读 `device_status`、`num_queues`、`queue_size` 等字段。
+
+## 19. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
