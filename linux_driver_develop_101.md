@@ -26,6 +26,7 @@
 19_virtio_vfio_notify_write.cpp  写一次 queue notify 但不 DRIVER_OK
 20_virtio_vfio_driver_ok.cpp  写 DRIVER_OK，启动空 queue 后 reset 清理
 21_virtio_net_rx_buffers.cpp  配置 RX/TX queue pair，发布 RX buffer 并观察 used ring
+22_virtio_net_rx_observe.cpp  等待 RX used ring，dump 收到的 RX buffer 前缀
 ```
 
 ## Contents
@@ -59,7 +60,8 @@
 - [27. Sample 19: Write one virtio queue notify through VFIO](#27-sample-19-write-one-virtio-queue-notify-through-vfio)
 - [28. Sample 20: Set virtio DRIVER_OK through VFIO](#28-sample-20-set-virtio-driver_ok-through-vfio)
 - [29. Sample 21: Post virtio-net RX buffers through VFIO](#29-sample-21-post-virtio-net-rx-buffers-through-vfio)
-- [30. 最小心智模型](#30-最小心智模型)
+- [30. Sample 22: Observe virtio-net RX packets through VFIO](#30-sample-22-observe-virtio-net-rx-packets-through-vfio)
+- [31. 最小心智模型](#31-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2142,7 +2144,99 @@ VFIO 测试设备上运行。
 virtio-net device。更关键的观察点是：`DRIVER_OK` 后是否还能维持一段时间而不立刻进入
 `NEEDS_RESET`。
 
-## 30. 最小心智模型
+## 30. Sample 22: Observe virtio-net RX packets through VFIO
+
+文件：
+
+```text
+userspace_drivers/22_virtio_net_rx_observe.cpp
+```
+
+sample 22 继续使用 sample 21 的 RX/TX queue pair setup，但它会等待 RX used ring
+前进，并根据 used descriptor id 找回对应的 RX buffer，dump buffer 前缀。
+
+和前面的只读/半初始化 sample 不同，这个 sample 需要 device 真实执行 DMA，所以它还会
+通过 VFIO CONFIG region 检查并打开 PCI command register 里的：
+
+```text
+PCI_COMMAND_MEMORY
+PCI_COMMAND_MASTER
+```
+
+退出前会 reset device，并把 PCI command register 恢复到进入 sample 前的值。
+
+它还会解析 `DEVICE_CFG` 并打印 virtio-net config 中的 MAC/status。feature negotiation
+会在 device 提供时接受：
+
+```text
+VIRTIO_NET_F_MAC
+VIRTIO_NET_F_STATUS
+```
+
+这有助于确认 userspace 发送端使用的目的 MAC 是否等于 VF#3 的真实 virtio-net config
+MAC，也能看到 backend 暴露的 link status。
+
+运行：
+
+```bash
+./22_virtio_net_rx_observe_static 0000:c1:00.6
+./22_virtio_net_rx_observe_static 0000:c1:00.6 --queue-size 128 --rx-buffer-size 4096 --wait-ms 10000 --yes
+./22_virtio_net_rx_observe_static 0000:c1:00.6 --rx-buffers 64 --stop-after 4 --dump-bytes 128 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. reset device
+2. 打开 PCI Memory Space / Bus Master
+3. 写 ACKNOWLEDGE、DRIVER
+4. 协商 feature set，并确认 FEATURES_OK
+5. 读取并打印 virtio-net device config MAC/status
+6. 配置并 enable RX queue 0
+7. 配置并 enable TX queue 1
+8. 发布 RX descriptors
+9. 写 DRIVER_OK
+10. notify RX queue
+11. 等待 RX used.idx 前进，最多等 --wait-ms
+12. 对 used entries 打印 desc id 和 len
+13. 根据 desc id 找到 RX buffer
+14. dump virtio-net header、Ethernet header 和前 --dump-bytes 字节
+15. reset device
+16. 恢复 PCI command register
+17. VFIO_IOMMU_UNMAP_DMA
+```
+
+因为本 sample 协商了 `VIRTIO_F_VERSION_1`，RX buffer 开头按 modern
+`virtio_net_hdr_v1` 解释，也就是 12-byte virtio-net header：
+
+```text
+flags
+gso_type
+hdr_len
+gso_size
+csum_start
+csum_offset
+num_buffers
+```
+
+随后才是 Ethernet frame。
+
+如果想看到 `RX used.idx` 增长，需要让对端向这个 virtio-net device 发流量。比如让对端
+发 ARP、ping 或 broadcast。没有流量时，sample 可以保持 `DRIVER_OK` 但不会 dump packet。
+
+这个 sample 仍然不是完整网络 driver：
+
+```text
+不 recycle RX descriptor
+不发送 TX packet
+不处理 control virtqueue
+不注册 Linux netdev
+```
+
+它的定位是证明：userspace 已经可以让 virtio-net device DMA 写入 packet buffer，并从
+used ring 取回完成信息。
+
+## 31. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
