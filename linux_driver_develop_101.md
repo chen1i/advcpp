@@ -13,6 +13,7 @@
 06_vfio_info.cpp      通过 VFIO API 查看 vfio-pci 设备的 regions/IRQs
 07_vfio_region_dump.cpp  通过 VFIO mmap region 并读取 BAR 内容
 08_vfio_dma_map.cpp   把 userspace buffer 映射到 VFIO IOMMU IOVA
+09_vfio_irq_eventfd.cpp  把 VFIO interrupt 连接到 eventfd 并 poll 等待
 ```
 
 ## 1. Driver 开发的基本路线
@@ -1326,7 +1327,85 @@ WRITE = device 可以写 host memory
 ./08_vfio_dma_map_static 0000:c1:00.3 0x100000000 4096 --read --write --yes
 ```
 
-## 17. 最小心智模型
+## 17. Sample 09: VFIO IRQ eventfd
+
+文件：
+
+```text
+userspace_drivers/09_vfio_irq_eventfd.cpp
+```
+
+VFIO interrupt 通常不会直接变成 Unix signal。userspace driver 会提供一个
+`eventfd`，让 kernel 在中断到来时递增这个 fd 的 counter：
+
+```text
+eventfd() -> VFIO_DEVICE_SET_IRQS -> poll(eventfd)
+```
+
+先查看设备暴露了哪些 IRQ index：
+
+```bash
+./09_vfio_irq_eventfd_static 0000:c1:00.6 --show
+```
+
+输出里常见的 PCI IRQ index 是：
+
+```text
+0 = INTx
+1 = MSI
+2 = MSI-X
+3 = ERR
+4 = REQ
+```
+
+把某个 IRQ index/vector 绑定到 eventfd，然后等待：
+
+```bash
+./09_vfio_irq_eventfd_static 0000:c1:00.6 --irq 2 --vector 0 --wait-ms 5000 --yes
+```
+
+如果只是想验证 VFIO eventfd wiring 本身，不依赖真实设备产生中断，可以使用
+VFIO 的 loopback trigger：
+
+```bash
+./09_vfio_irq_eventfd_static 0000:c1:00.6 --irq 2 --vector 0 --trigger-test --yes
+```
+
+这个 sample 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 查询 VFIO_DEVICE_GET_INFO
+4. 查询 VFIO_DEVICE_GET_IRQ_INFO
+5. eventfd(0, EFD_NONBLOCK)
+6. VFIO_DEVICE_SET_IRQS，把 IRQ trigger 绑定到 eventfd
+7. poll(eventfd)
+8. read(eventfd) 读取 counter
+9. 用 eventfd=-1 解除 IRQ 绑定
+```
+
+这个 sample 不会：
+
+```text
+配置设备 queue
+写 BAR register
+启动 device DMA
+保证真实硬件一定会产生 interrupt
+```
+
+如果没有 `--trigger-test`，程序只是在等真实设备 interrupt。没有 queue/DMA 或设备事件时，
+timeout 是正常结果。
+
+如果打开 group 时报 `cannot open /dev/vfio/<group>: Device or resource busy`，
+说明这个 VFIO group 已经被另一个进程打开。VFIO group 通常是独占的，先定位占用者：
+
+```bash
+fuser -v /dev/vfio/87
+lsof /dev/vfio/87
+```
+
+## 18. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
