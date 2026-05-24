@@ -776,6 +776,38 @@ inline DmaLayout compute_dma_layout(std::uint16_t rx_queue_size,
                                     std::uint16_t tx_queue_size,
                                     std::size_t align,
                                     std::uint16_t rx_buffers,
+                                    std::size_t rx_buffer_size) {
+  if (rx_buffers == 0)
+    throw std::runtime_error("rx-buffers must be greater than 0");
+  if (rx_buffers > rx_queue_size) {
+    throw std::runtime_error("rx-buffers must not exceed RX queue_size " +
+                             std::to_string(rx_queue_size));
+  }
+  if (rx_buffer_size == 0)
+    throw std::runtime_error("rx-buffer-size must be greater than 0");
+
+  DmaLayout layout;
+  layout.rx_vring = compute_vring_layout(rx_queue_size, align);
+  layout.tx_vring = compute_vring_layout(tx_queue_size, align);
+  layout.rx_vring_offset = 0;
+  layout.tx_vring_offset = round_up_to_page(layout.rx_vring.total_size);
+  layout.rx_buffers_offset =
+      round_up_to_page(checked_add(layout.tx_vring_offset,
+                                   layout.tx_vring.total_size,
+                                   "TX vring end"));
+  layout.rx_buffers_size =
+      checked_mul(rx_buffers, rx_buffer_size, "RX buffer area");
+  layout.total_size =
+      round_up_to_page(checked_add(layout.rx_buffers_offset,
+                                   layout.rx_buffers_size,
+                                   "DMA mapping"));
+  return layout;
+}
+
+inline DmaLayout compute_dma_layout(std::uint16_t rx_queue_size,
+                                    std::uint16_t tx_queue_size,
+                                    std::size_t align,
+                                    std::uint16_t rx_buffers,
                                     std::uint16_t tx_buffers,
                                     std::size_t rx_buffer_size,
                                     std::size_t tx_buffer_size) {
@@ -838,10 +870,12 @@ inline void print_dma_layout(const DmaLayout &layout, std::uint64_t base_iova,
                base_iova + layout.rx_buffers_offset);
   std::println("  RX buffers: {} x {} bytes", rx_buffers, rx_buffer_size);
   std::println("  RX buffer bytes: {}", layout.rx_buffers_size);
-  std::println("  TX packet offset: 0x{:x}", layout.tx_packet_offset);
-  std::println("  TX packet IOVA: 0x{:x}",
-               base_iova + layout.tx_packet_offset);
-  std::println("  TX scratch buffer bytes: {}", layout.tx_packet_size);
+  if (layout.tx_packet_size > 0) {
+    std::println("  TX packet offset: 0x{:x}", layout.tx_packet_offset);
+    std::println("  TX packet IOVA: 0x{:x}",
+                 base_iova + layout.tx_packet_offset);
+    std::println("  TX scratch buffer bytes: {}", layout.tx_packet_size);
+  }
   std::println("  mapped bytes: {}", layout.total_size);
 }
 
@@ -1190,6 +1224,47 @@ inline void print_rx_used_entries(std::uint8_t *rx_queue_base,
     std::println("  slot {}: id={} len={}", slot,
                  static_cast<std::uint32_t>(elems[slot].id),
                  static_cast<std::uint32_t>(elems[slot].len));
+  }
+}
+
+inline void dump_rx_used_buffers(std::uint8_t *dma_base,
+                                 std::uint8_t *rx_queue_base,
+                                 const DmaLayout &layout,
+                                 std::uint16_t old_idx,
+                                 std::uint16_t new_idx,
+                                 std::uint16_t rx_buffers,
+                                 std::size_t rx_buffer_size,
+                                 std::uint16_t max_entries,
+                                 std::size_t dump_bytes) {
+  std::uint16_t count = used_delta(old_idx, new_idx);
+  if (count == 0)
+    return;
+
+  const volatile VringUsedElem *elems =
+      vring_used_elems(rx_queue_base, layout.rx_vring);
+  std::uint16_t to_dump = std::min<std::uint16_t>(
+      std::min<std::uint16_t>(count, rx_buffers), max_entries);
+  std::println("RX packet buffer dump:");
+  for (std::uint16_t i = 0; i < to_dump; ++i) {
+    std::uint16_t slot =
+        static_cast<std::uint16_t>((old_idx + i) % layout.rx_vring.queue_size);
+    std::uint32_t id = static_cast<std::uint32_t>(elems[slot].id);
+    std::uint32_t len = static_cast<std::uint32_t>(elems[slot].len);
+    std::println("  used slot {}: desc id={} len={}", slot, id, len);
+
+    if (id >= rx_buffers) {
+      std::println("  cannot dump: descriptor id is outside posted RX buffers");
+      continue;
+    }
+    if (len > rx_buffer_size) {
+      std::println("  cannot dump safely: used len exceeds RX buffer size {}",
+                   rx_buffer_size);
+      continue;
+    }
+
+    std::uint8_t *packet_buffer =
+        dma_base + layout.rx_buffers_offset + id * rx_buffer_size;
+    print_virtio_net_rx_buffer(packet_buffer, len, dump_bytes);
   }
 }
 
