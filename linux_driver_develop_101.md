@@ -21,6 +21,7 @@
 14_virtio_vfio_feature_bits.cpp  读取 feature bits 并练习 FEATURES_OK 协商
 15_virtio_vfio_vring_map.cpp  计算 split vring 布局并用 VFIO 映射 DMA 内存
 16_virtio_vfio_queue_program.cpp  写 queue_size/desc/avail/used 但不 enable queue
+17_virtio_vfio_queue_enable.cpp  写 queue_enable=1 但不 notify / DRIVER_OK
 ```
 
 ## Contents
@@ -49,7 +50,8 @@
 - [22. Sample 14: Virtio feature bits through VFIO](#22-sample-14-virtio-feature-bits-through-vfio)
 - [23. Sample 15: Virtio split vring DMA map through VFIO](#23-sample-15-virtio-split-vring-dma-map-through-vfio)
 - [24. Sample 16: Program virtio queue addresses through VFIO](#24-sample-16-program-virtio-queue-addresses-through-vfio)
-- [25. 最小心智模型](#25-最小心智模型)
+- [25. Sample 17: Enable one virtio queue through VFIO](#25-sample-17-enable-one-virtio-queue-through-vfio)
+- [26. 最小心智模型](#26-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1826,7 +1828,59 @@ unmap 之前就应该先让设备忘掉这些地址。
 虽然本 sample 不 enable queue、不 DRIVER_OK，理论上设备不应该开始使用这些地址，
 但 reset cleanup 是 userspace driver 里更稳妥的习惯。
 
-## 25. 最小心智模型
+## 25. Sample 17: Enable one virtio queue through VFIO
+
+文件：
+
+```text
+userspace_drivers/17_virtio_vfio_queue_enable.cpp
+```
+
+sample 17 在 sample 16 的基础上再写一步：
+
+```text
+queue_enable = 1
+```
+
+运行：
+
+```bash
+./17_virtio_vfio_queue_enable_static 0000:c1:00.6 --queue 0
+./17_virtio_vfio_queue_enable_static 0000:c1:00.6 --queue 0 --yes
+./17_virtio_vfio_queue_enable_static 0000:c1:00.6 --queue 0 --queue-size 128 --iova 0x200000000 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. reset device
+2. 写 ACKNOWLEDGE、DRIVER
+3. 协商最小 feature set，并确认 FEATURES_OK
+4. 写 queue_select=N
+5. 读取目标 queue 的 max queue_size
+6. 计算 split vring desc/avail/used IOVA
+7. mmap zeroed userspace buffer，并 VFIO_IOMMU_MAP_DMA
+8. 写 queue_size / queue_desc / queue_avail / queue_used
+9. 写 queue_enable=1
+10. 读回 queue registers，确认 queue_enable=1
+11. 恢复原始 queue_select
+12. reset device，清掉 enabled queue 和 queue 地址
+13. VFIO_IOMMU_UNMAP_DMA
+```
+
+这个 sample 不会：
+
+```text
+notify device
+写 DRIVER_OK
+启动 device DMA
+```
+
+`queue_enable=1` 表示这条 virtqueue 的配置已经交给 device。真正让 device 进入
+运行状态还需要后续的 `DRIVER_OK`。本 sample 退出前 reset，是为了避免 enabled
+queue 在 DMA memory 被 unmap 后仍留在设备里。
+
+## 26. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
