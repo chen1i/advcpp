@@ -25,6 +25,7 @@
 18_virtio_vfio_notify_info.cpp  解析 NOTIFY_CFG 并计算 queue notify MMIO offset
 19_virtio_vfio_notify_write.cpp  写一次 queue notify 但不 DRIVER_OK
 20_virtio_vfio_driver_ok.cpp  写 DRIVER_OK，启动空 queue 后 reset 清理
+21_virtio_net_rx_buffers.cpp  配置 RX/TX queue pair，发布 RX buffer 并观察 used ring
 ```
 
 ## Contents
@@ -57,7 +58,8 @@
 - [26. Sample 18: Virtio notify information through VFIO](#26-sample-18-virtio-notify-information-through-vfio)
 - [27. Sample 19: Write one virtio queue notify through VFIO](#27-sample-19-write-one-virtio-queue-notify-through-vfio)
 - [28. Sample 20: Set virtio DRIVER_OK through VFIO](#28-sample-20-set-virtio-driver_ok-through-vfio)
-- [29. 最小心智模型](#29-最小心智模型)
+- [29. Sample 21: Post virtio-net RX buffers through VFIO](#29-sample-21-post-virtio-net-rx-buffers-through-vfio)
+- [30. 最小心智模型](#30-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2078,7 +2080,69 @@ DRIVER_OK 是真正进入 device runtime 的边界。
 所以 sample 20 的定位是演示 `DRIVER_OK` 状态边界，而不是一个可持续运行的
 virtio-net userspace driver。
 
-## 29. 最小心智模型
+## 29. Sample 21: Post virtio-net RX buffers through VFIO
+
+文件：
+
+```text
+userspace_drivers/21_virtio_net_rx_buffers.cpp
+```
+
+sample 21 是第一个真正给 virtio-net device 提供 RX DMA buffer 的例子。它默认使用：
+
+```text
+queue 0 = RX
+queue 1 = TX
+```
+
+这对应没有协商 `VIRTIO_NET_F_MQ` 时的第一个 RX/TX queue pair。
+
+运行：
+
+```bash
+./21_virtio_net_rx_buffers_static 0000:c1:00.6
+./21_virtio_net_rx_buffers_static 0000:c1:00.6 --queue-size 128 --iova 0x200000000 --yes
+./21_virtio_net_rx_buffers_static 0000:c1:00.6 --queue-size 128 --rx-buffers 16 --rx-buffer-size 4096 --wait-ms 2000 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. reset device
+2. 写 ACKNOWLEDGE、DRIVER
+3. 协商最小 feature set，并确认 FEATURES_OK
+4. 读取 RX queue 0 和 TX queue 1 的 queue_size
+5. 分配一块 DMA memory，里面放 RX vring、TX vring、RX packet buffers
+6. 把 RX descriptors 填成 writable buffer descriptors
+7. 写 RX avail.ring[] 和 RX avail.idx
+8. 配置并 enable RX queue
+9. 配置并 enable TX queue
+10. 写 DRIVER_OK
+11. notify RX queue
+12. 在 --wait-ms 时间内观察 RX used.idx
+13. 恢复原始 queue_select
+14. reset device
+15. VFIO_IOMMU_UNMAP_DMA
+```
+
+这个 sample 仍然不会：
+
+```text
+发送 TX packet
+处理 control virtqueue
+解析收到的 packet
+回收 used RX descriptor
+长期运行
+```
+
+注意：从这个 sample 开始，device 可以真实 DMA 写入 userspace buffer。它应该只在隔离的
+VFIO 测试设备上运行。
+
+如果 `RX used.idx` 没有变化，不一定表示 setup 失败；可能只是没有外部流量进入这个
+virtio-net device。更关键的观察点是：`DRIVER_OK` 后是否还能维持一段时间而不立刻进入
+`NEEDS_RESET`。
+
+## 30. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
