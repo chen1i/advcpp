@@ -20,6 +20,7 @@
 13_virtio_vfio_reset_status.cpp  练习 virtio device_status reset/ACK/DRIVER 状态机
 14_virtio_vfio_feature_bits.cpp  读取 feature bits 并练习 FEATURES_OK 协商
 15_virtio_vfio_vring_map.cpp  计算 split vring 布局并用 VFIO 映射 DMA 内存
+16_virtio_vfio_queue_program.cpp  写 queue_size/desc/avail/used 但不 enable queue
 ```
 
 ## Contents
@@ -47,7 +48,8 @@
 - [21. Sample 13: Virtio reset/status through VFIO](#21-sample-13-virtio-resetstatus-through-vfio)
 - [22. Sample 14: Virtio feature bits through VFIO](#22-sample-14-virtio-feature-bits-through-vfio)
 - [23. Sample 15: Virtio split vring DMA map through VFIO](#23-sample-15-virtio-split-vring-dma-map-through-vfio)
-- [24. 最小心智模型](#24-最小心智模型)
+- [24. Sample 16: Program virtio queue addresses through VFIO](#24-sample-16-program-virtio-queue-addresses-through-vfio)
+- [25. 最小心智模型](#25-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1767,7 +1769,64 @@ notify device
 如果目标 queue 已经 enabled，sample 会拒绝继续。这个检查避免在已有 driver 状态上
 做教程实验。
 
-## 24. 最小心智模型
+## 24. Sample 16: Program virtio queue addresses through VFIO
+
+文件：
+
+```text
+userspace_drivers/16_virtio_vfio_queue_program.cpp
+```
+
+sample 16 在 sample 15 的基础上再前进一步：把 vring 的三个 IOVA 写入设备的
+queue 地址寄存器。
+
+运行：
+
+```bash
+./16_virtio_vfio_queue_program_static 0000:c1:00.6 --queue 0
+./16_virtio_vfio_queue_program_static 0000:c1:00.6 --queue 0 --yes
+./16_virtio_vfio_queue_program_static 0000:c1:00.6 --queue 0 --queue-size 128 --iova 0x200000000 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. reset device
+2. 写 ACKNOWLEDGE、DRIVER
+3. 读取 device features，写最小 guest features
+4. 写 FEATURES_OK，并确认设备接受
+5. 写 queue_select=N
+6. 读取目标 queue 的 max queue_size
+7. 计算 split vring desc/avail/used IOVA
+8. mmap zeroed userspace buffer，并 VFIO_IOMMU_MAP_DMA
+9. 写 queue_size
+10. 写 queue_desc / queue_avail / queue_used
+11. 读回 queue registers 做验证
+12. 恢复原始 queue_select
+13. reset device，清掉刚写入的 queue 地址
+14. VFIO_IOMMU_UNMAP_DMA
+```
+
+这个 sample 不会：
+
+```text
+写 queue_enable
+notify device
+写 DRIVER_OK
+启动 device DMA
+```
+
+为什么退出前要 reset：
+
+```text
+只要 queue_desc/queue_avail/queue_used 指向 userspace IOVA，
+unmap 之前就应该先让设备忘掉这些地址。
+```
+
+虽然本 sample 不 enable queue、不 DRIVER_OK，理论上设备不应该开始使用这些地址，
+但 reset cleanup 是 userspace driver 里更稳妥的习惯。
+
+## 25. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
