@@ -28,6 +28,7 @@
 21_virtio_net_rx_buffers.cpp  配置 RX/TX queue pair，发布 RX buffer 并观察 used ring
 22_virtio_net_rx_observe.cpp  等待 RX used ring，dump 收到的 RX buffer 前缀
 23_virtio_net_tx_packet.cpp  发布 TX descriptor，发送一帧并观察 TX completion
+24_virtio_net_rx_tx_echo.cpp  收到一帧后构造 reply，并通过 TX queue 回发
 ```
 
 ## Contents
@@ -63,7 +64,8 @@
 - [29. Sample 21: Post virtio-net RX buffers through VFIO](#29-sample-21-post-virtio-net-rx-buffers-through-vfio)
 - [30. Sample 22: Observe virtio-net RX packets through VFIO](#30-sample-22-observe-virtio-net-rx-packets-through-vfio)
 - [31. Sample 23: Send virtio-net TX packet through VFIO](#31-sample-23-send-virtio-net-tx-packet-through-vfio)
-- [32. 最小心智模型](#32-最小心智模型)
+- [32. Sample 24: Echo one virtio-net RX packet through VFIO](#32-sample-24-echo-one-virtio-net-rx-packet-through-vfio)
+- [33. 最小心智模型](#33-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2292,7 +2294,63 @@ payload   = 内置 vfio-tx-test payload
 DMA buffer。这个 sample 不保证对端一定收到 frame；对端接收还要看 DPU OVS 转发、MAC
 学习、VF port 状态和目标 host 的 RX path。
 
-## 32. 最小心智模型
+## 32. Sample 24: Echo one virtio-net RX packet through VFIO
+
+文件：
+
+```text
+userspace_drivers/24_virtio_net_rx_tx_echo.cpp
+```
+
+sample 24 把 sample 22 的 RX path 和 sample 23 的 TX path 接在一起。它先给 RX queue
+发布 buffer，进入 `DRIVER_OK` 后等待一帧匹配的 RX packet；收到后把 Ethernet frame 拷贝到
+TX buffer，目的 MAC 改成收到帧的源 MAC，源 MAC 默认使用 virtio-net DEVICE_CFG 里的 VF
+MAC，然后发布一个 TX descriptor 并 notify TX queue。
+
+运行：
+
+```bash
+./24_virtio_net_rx_tx_echo_static 0000:c1:00.6
+./24_virtio_net_rx_tx_echo_static 0000:c1:00.6 --wait-ms 60000 --yes
+./24_virtio_net_rx_tx_echo_static 0000:c1:00.6 --match-ethertype 0x88b5 --dump-bytes 192 --yes
+```
+
+默认行为：
+
+```text
+RX queue          = 0
+TX queue          = 1
+RX buffers        = 64 x 2048 bytes
+match-ethertype   = 0x88b5
+reply source MAC  = virtio-net DEVICE_CFG 里的 MAC
+reply destination = received Ethernet source MAC
+```
+
+测试时，可以先启动 sample 24，再从另一个 VF 向目标 VF MAC 发一帧 `0x88b5` 的 raw
+Ethernet packet。成功时应该看到：
+
+```text
+RX used.idx after wait: ... (delta 1)
+Selected RX packet for reply:
+  reply dst-mac: <sender MAC>
+  reply src-mac: <this VF MAC>
+Published one TX reply descriptor
+TX used.idx after wait: ... (delta 1)
+```
+
+这个 sample 仍然只做一次性 datapath 验证：
+
+```text
+不 recycle RX descriptor
+不持续处理多包
+不处理 checksum/offload metadata
+不实现 ARP/IP/TCP 协议栈
+```
+
+它的定位是证明：userspace 已经能完成一个最小闭环：device DMA 写入 RX buffer，
+userspace 消费 RX used entry，再通过 TX queue 把 reply 交还给 device/backend。
+
+## 33. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
