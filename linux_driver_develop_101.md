@@ -18,6 +18,7 @@
 11_virtio_vfio_common_cfg.cpp  mmap virtio COMMON_CFG 并读取基础状态
 12_virtio_vfio_queue_info.cpp  写 queue_select 并枚举 virtqueue 状态
 13_virtio_vfio_reset_status.cpp  练习 virtio device_status reset/ACK/DRIVER 状态机
+14_virtio_vfio_feature_bits.cpp  读取 feature bits 并练习 FEATURES_OK 协商
 ```
 
 ## Contents
@@ -43,7 +44,8 @@
 - [19. Sample 11: Virtio common config through VFIO](#19-sample-11-virtio-common-config-through-vfio)
 - [20. Sample 12: Virtio queue info through VFIO](#20-sample-12-virtio-queue-info-through-vfio)
 - [21. Sample 13: Virtio reset/status through VFIO](#21-sample-13-virtio-resetstatus-through-vfio)
-- [22. 最小心智模型](#22-最小心智模型)
+- [22. Sample 14: Virtio feature bits through VFIO](#22-sample-14-virtio-feature-bits-through-vfio)
+- [23. 最小心智模型](#23-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1639,7 +1641,65 @@ notify device
 `--reset` 会改变真实设备状态，可能清掉之前的 queue/config 状态，所以真实写入需要
 `--yes`。
 
-## 22. 最小心智模型
+## 22. Sample 14: Virtio feature bits through VFIO
+
+文件：
+
+```text
+userspace_drivers/14_virtio_vfio_feature_bits.cpp
+```
+
+virtio feature registers 也是 selected-window 形式：
+
+```text
+write device_feature_select = N
+read  device_feature
+
+write guest_feature_select = N
+write guest_feature
+```
+
+sample 14 有两种模式：
+
+```bash
+./14_virtio_vfio_feature_bits_static 0000:c1:00.6 --show
+./14_virtio_vfio_feature_bits_static 0000:c1:00.6 --show --yes
+./14_virtio_vfio_feature_bits_static 0000:c1:00.6 --negotiate-minimal --yes
+```
+
+`--show` 默认不写寄存器，只显示当前 selected feature view，并说明如果加
+`--yes` 会写哪些 selector。`--show --yes` 会写
+`device_feature_select=0..2` 和 `guest_feature_select=0..2` 来枚举 feature
+words，然后恢复原 selector。
+
+`--negotiate-minimal --yes` 做的事情：
+
+```text
+1. 写 device_status=0，等待 reset 完成
+2. 写 ACKNOWLEDGE
+3. 写 ACKNOWLEDGE|DRIVER
+4. 读取 device feature words
+5. 写最小 guest feature set：
+   - VIRTIO_F_VERSION_1
+   - 如果设备提供 VIRTIO_F_ACCESS_PLATFORM，也接受它
+6. 写 ACKNOWLEDGE|DRIVER|FEATURES_OK
+7. 读取 device_status，确认 FEATURES_OK 没被设备清掉
+```
+
+这个 sample 不会：
+
+```text
+写 DRIVER_OK
+配置 queue
+写 queue_desc / queue_avail / queue_used
+notify device
+启动 device DMA
+```
+
+`FEATURES_OK` 只是说明 device 接受了 guest feature subset。真正让设备开始工作的
+是更后面的 `DRIVER_OK`，需要先配置 virtqueue 和 DMA buffer。
+
+## 23. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
