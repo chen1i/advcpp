@@ -19,6 +19,7 @@
 12_virtio_vfio_queue_info.cpp  写 queue_select 并枚举 virtqueue 状态
 13_virtio_vfio_reset_status.cpp  练习 virtio device_status reset/ACK/DRIVER 状态机
 14_virtio_vfio_feature_bits.cpp  读取 feature bits 并练习 FEATURES_OK 协商
+15_virtio_vfio_vring_map.cpp  计算 split vring 布局并用 VFIO 映射 DMA 内存
 ```
 
 ## Contents
@@ -45,7 +46,8 @@
 - [20. Sample 12: Virtio queue info through VFIO](#20-sample-12-virtio-queue-info-through-vfio)
 - [21. Sample 13: Virtio reset/status through VFIO](#21-sample-13-virtio-resetstatus-through-vfio)
 - [22. Sample 14: Virtio feature bits through VFIO](#22-sample-14-virtio-feature-bits-through-vfio)
-- [23. 最小心智模型](#23-最小心智模型)
+- [23. Sample 15: Virtio split vring DMA map through VFIO](#23-sample-15-virtio-split-vring-dma-map-through-vfio)
+- [24. 最小心智模型](#24-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1699,7 +1701,73 @@ notify device
 `FEATURES_OK` 只是说明 device 接受了 guest feature subset。真正让设备开始工作的
 是更后面的 `DRIVER_OK`，需要先配置 virtqueue 和 DMA buffer。
 
-## 23. 最小心智模型
+## 23. Sample 15: Virtio split vring DMA map through VFIO
+
+文件：
+
+```text
+userspace_drivers/15_virtio_vfio_vring_map.cpp
+```
+
+sample 15 进入 virtqueue 内存布局，但仍然不启动设备。split virtqueue 可以看成三块：
+
+```text
+descriptor table
+available ring
+used ring
+```
+
+modern virtio PCI 有三个独立地址寄存器：
+
+```text
+queue_desc
+queue_avail
+queue_used
+```
+
+本 sample 只计算这三块在一个连续 userspace buffer 里的 offset，并把整个 buffer
+通过 `VFIO_IOMMU_MAP_DMA` 映射成 IOVA。它不会把这些 IOVA 写进设备寄存器。
+
+运行：
+
+```bash
+./15_virtio_vfio_vring_map_static 0000:c1:00.6 --queue 0
+./15_virtio_vfio_vring_map_static 0000:c1:00.6 --queue 0 --yes
+./15_virtio_vfio_vring_map_static 0000:c1:00.6 --queue 0 --queue-size 128 --iova 0x200000000 --yes
+```
+
+默认 dry-run 不打开 VFIO、不写寄存器。如果指定 `--queue-size`，dry-run 可以直接
+计算 vring 布局；如果不指定，则真实执行时从设备的目标 queue 读取 `queue_size`。
+
+`--yes` 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. mmap virtio COMMON_CFG
+4. 保存原始 queue_select
+5. 写 queue_select=N，读取目标 queue_size / queue_enable / queue_notify_off
+6. 计算 split vring 的 desc/avail/used offset 和 IOVA
+7. mmap 一个 zeroed userspace buffer
+8. 用 VFIO_IOMMU_MAP_DMA 把 buffer 映射到指定 IOVA
+9. 立即 VFIO_IOMMU_UNMAP_DMA
+10. 恢复原始 queue_select
+```
+
+这个 sample 不会：
+
+```text
+写 queue_desc / queue_avail / queue_used
+写 queue_enable
+notify device
+写 DRIVER_OK
+启动 device DMA
+```
+
+如果目标 queue 已经 enabled，sample 会拒绝继续。这个检查避免在已有 driver 状态上
+做教程实验。
+
+## 24. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
