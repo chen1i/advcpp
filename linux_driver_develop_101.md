@@ -32,6 +32,19 @@
 25_virtio_net_echo_loop.cpp  多包 echo loop，回收 RX/TX descriptor
 ```
 
+当前 `userspace_drivers/` 的代码组织：
+
+```text
+11-20: 仍保持每个 sample 尽量自包含，方便逐步学习 VFIO / virtio PCI 机制
+21-25: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
+
+vfio_utils.hpp       通用 VFIO / PCI config / region / capability helper
+virtio_net_vfio.hpp  virtio-net queue、vring、DMA、feature、notify、packet helper
+```
+
+这个边界是刻意的：前半段更重视“每一步展开看清楚”，后半段已经进入重复的
+virtio-net datapath，所以复用 helper 能降低维护成本，同时保留每个 sample 的教学目标。
+
 ## Contents
 
 - [1. Driver 开发的基本路线](#1-driver-开发的基本路线)
@@ -67,7 +80,8 @@
 - [31. Sample 23: Send virtio-net TX packet through VFIO](#31-sample-23-send-virtio-net-tx-packet-through-vfio)
 - [32. Sample 24: Echo one virtio-net RX packet through VFIO](#32-sample-24-echo-one-virtio-net-rx-packet-through-vfio)
 - [33. Sample 25: Run a small virtio-net echo loop through VFIO](#33-sample-25-run-a-small-virtio-net-echo-loop-through-vfio)
-- [34. 最小心智模型](#34-最小心智模型)
+- [34. Refactor 结论：samples 21-25 的代码结构](#34-refactor-结论samples-21-25-的代码结构)
+- [35. 最小心智模型](#35-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2418,7 +2432,82 @@ loop 内部做的事情：
 它的定位是证明：userspace 不仅能收一包、发一包，还能维护 ring index 和 descriptor
 生命周期，持续处理一个小批量的 packet。
 
-## 34. 最小心智模型
+## 34. Refactor 结论：samples 21-25 的代码结构
+
+本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-25 这组已经进入
+virtio-net datapath 的 sample 从“大量重复实现”收敛成“每个 sample 只展示新增概念”。
+
+完成后的分工：
+
+```text
+vfio_utils.hpp
+    UniqueFd / AnonymousBuffer / MappedRegion / DmaMapping
+    VFIO container/group/device 打开
+    IOMMU group 和 region info 打印
+    PCI config region 读写
+    virtio PCI capability 解析
+    COMMON_CFG / NOTIFY_CFG / DEVICE_CFG mmap helper
+
+virtio_net_vfio.hpp
+    virtio-net feature negotiation helper
+    QueueSelectionGuard / DeviceResetGuard / PciCommandGuard
+    split vring layout 和 DMA memory layout
+    RX descriptor 发布、RX descriptor recycle
+    TX descriptor 发布
+    queue address programming、queue_enable、notify、DRIVER_OK
+    virtio-net config 读取和打印
+    RX used entry / packet dump / echo reply helper
+```
+
+21-25 现在的 sample 文件只保留：
+
+```text
+Options
+usage()
+dry_run()
+本 sample 的 run_*() 主流程
+main() 参数解析
+```
+
+各 sample 保留的边界：
+
+```text
+21  只发布 RX buffers，使用 transport-only minimal features；
+    不读 DEVICE_CFG，不引入 MAC/STATUS，保持“给 device buffer 后是否还能运行”的教学点。
+
+22  在 21 基础上读取 DEVICE_CFG，接受 MAC/STATUS，等待 RX used ring 并 dump packet。
+
+23  在 22 的 queue setup 基础上发布一个 TX descriptor，观察 TX completion。
+
+24  把 22 的 RX path 和 23 的 TX path 接起来，做一次 RX->TX echo。
+
+25  在 24 基础上维护 RX/TX descriptor 生命周期，做有限个 packet 的 echo loop。
+```
+
+为什么 `virtio_net_vfio.hpp` 里的函数是 `inline`：
+
+```text
+这是 header-only helper，被 21/22/23/24/25 多个独立 executable 同时 include。
+函数定义放在 header 里时必须用 inline，否则链接多个 sample 时会出现 multiple definition。
+这里的 inline 是链接语义，不是为了强迫编译器内联优化。
+```
+
+如果后续 helper 继续增长，可以把 `virtio_net_vfio.hpp` 拆成：
+
+```text
+virtio_net_vfio.hpp   declarations / small templates
+virtio_net_vfio.cpp   function definitions
+libvirtio_net_vfio    CMake static library
+```
+
+暂时保留 header-only 的原因是：当前 samples 都是教学用独立 executable，header-only
+可以减少 CMake target 复杂度，也方便阅读时从 sample 直接跳到 helper 实现。
+
+本轮没有重构 11-20。原因是 11-20 还处于逐步展开 VFIO / virtio PCI 基础机制的阶段，
+重复代码虽然多，但有助于每个 sample 单独说明“这一步新增了什么”。等这部分稳定后，可以
+再考虑只抽出最底层的安全/RAII helper，而不要把状态机和 queue 操作过早隐藏起来。
+
+## 35. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
