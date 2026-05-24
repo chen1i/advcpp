@@ -15,6 +15,7 @@
 08_vfio_dma_map.cpp   把 userspace buffer 映射到 VFIO IOMMU IOVA
 09_vfio_irq_eventfd.cpp  把 VFIO interrupt 连接到 eventfd 并 poll 等待
 10_virtio_vfio_pci_caps.cpp  通过 VFIO CONFIG region 解析 virtio PCI capabilities
+11_virtio_vfio_common_cfg.cpp  mmap virtio COMMON_CFG 并读取基础状态
 ```
 
 ## Contents
@@ -37,7 +38,8 @@
 - [16. Sample 08: VFIO DMA Map / Unmap](#16-sample-08-vfio-dma-map--unmap)
 - [17. Sample 09: VFIO IRQ eventfd](#17-sample-09-vfio-irq-eventfd)
 - [18. Sample 10: Virtio PCI capabilities through VFIO](#18-sample-10-virtio-pci-capabilities-through-vfio)
-- [19. 最小心智模型](#19-最小心智模型)
+- [19. Sample 11: Virtio common config through VFIO](#19-sample-11-virtio-common-config-through-vfio)
+- [20. 最小心智模型](#20-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1484,7 +1486,49 @@ enable queue
 它的作用是先把 virtio register map 找出来。后续 sample 再基于这些
 BAR/offset 去读 `device_status`、`num_queues`、`queue_size` 等字段。
 
-## 19. 最小心智模型
+## 19. Sample 11: Virtio common config through VFIO
+
+文件：
+
+```text
+userspace_drivers/11_virtio_vfio_common_cfg.cpp
+```
+
+sample 10 找到了 `COMMON_CFG` 在哪个 BAR、哪个 offset。sample 11 会把这个
+BAR range 通过 VFIO mmap 出来，并读取 common config 里的基础字段：
+
+```bash
+./11_virtio_vfio_common_cfg_static 0000:c1:00.6 --show
+```
+
+这个 sample 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 解析 virtio COMMON_CFG capability
+4. 查询 COMMON_CFG 所在 BAR 的 VFIO region info
+5. mmap COMMON_CFG 对应的 BAR range
+6. 读取 device_status、num_queues、config_generation
+7. 读取当前 selected queue 的 queue_size、queue_enable、queue_notify_off
+```
+
+这个 sample 不会：
+
+```text
+写 device_status
+写 queue_select
+协商 feature
+enable queue
+notify device
+启动 device DMA
+```
+
+注意：`queue_*` 字段是“当前 selected queue”的视图。本 sample 不写
+`queue_select`，所以它只读取设备当前 selection 对应的 queue。后续 sample
+再专门练习选择 queue、读 queue 参数、配置 vring。
+
+## 20. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
