@@ -180,6 +180,34 @@ inline std::array<std::uint8_t, 6> parse_mac(std::string_view text,
   return mac;
 }
 
+inline std::vector<std::uint8_t> parse_hex_bytes(std::string_view text,
+                                                 std::string_view name) {
+  std::string hex;
+  hex.reserve(text.size());
+  for (char ch : text) {
+    if (std::isspace(static_cast<unsigned char>(ch)) || ch == ':' || ch == '-')
+      continue;
+    if (!std::isxdigit(static_cast<unsigned char>(ch))) {
+      throw std::runtime_error("invalid " + std::string(name) + ": " +
+                               std::string(text));
+    }
+    hex.push_back(ch);
+  }
+  if (hex.size() % 2 != 0) {
+    throw std::runtime_error("invalid " + std::string(name) +
+                             ": odd number of hex digits");
+  }
+
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(hex.size() / 2);
+  for (std::size_t i = 0; i < hex.size(); i += 2) {
+    std::string byte_text = hex.substr(i, 2);
+    bytes.push_back(
+        static_cast<std::uint8_t>(std::stoul(byte_text, nullptr, 16)));
+  }
+  return bytes;
+}
+
 inline std::uint32_t parse_u32(std::string_view text, std::string_view name) {
   unsigned long long value = parse_ull(text, name);
   if (value > std::numeric_limits<std::uint32_t>::max()) {
@@ -987,10 +1015,53 @@ inline std::uint16_t read_be16_from_bytes(const std::uint8_t *bytes) {
          (static_cast<std::uint16_t>(bytes[0]) << 8);
 }
 
+inline void write_be16_to_bytes(std::uint8_t *bytes, std::uint16_t value) {
+  bytes[0] = static_cast<std::uint8_t>(value >> 8);
+  bytes[1] = static_cast<std::uint8_t>(value & 0xffu);
+}
+
 inline std::array<std::uint8_t, 6> mac_from_bytes(const std::uint8_t *bytes) {
   std::array<std::uint8_t, 6> mac{};
   std::copy(bytes, bytes + mac.size(), mac.begin());
   return mac;
+}
+
+inline std::array<std::uint8_t, 6> broadcast_mac() {
+  return {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+}
+
+inline std::vector<std::uint8_t> default_tx_payload() {
+  std::vector<std::uint8_t> payload;
+  constexpr std::string_view prefix = "vfio-tx-test-";
+  payload.insert(payload.end(), prefix.begin(), prefix.end());
+  for (std::uint8_t i = 0; i < 100; ++i)
+    payload.push_back(i);
+  return payload;
+}
+
+inline std::size_t padded_ethernet_payload_size(std::size_t payload_size) {
+  std::size_t min_payload = kEthernetMinFrameSize - kEthernetHeaderSize;
+  return std::max(payload_size, min_payload);
+}
+
+inline std::size_t tx_packet_size_for_payload(std::size_t payload_size) {
+  return kVirtioNetHeaderSize + kEthernetHeaderSize +
+         padded_ethernet_payload_size(payload_size);
+}
+
+inline void build_tx_packet(std::uint8_t *packet,
+                            const std::array<std::uint8_t, 6> &dst,
+                            const std::array<std::uint8_t, 6> &src,
+                            std::uint16_t ethertype,
+                            const std::vector<std::uint8_t> &payload,
+                            std::size_t total_size) {
+  std::memset(packet, 0, total_size);
+
+  std::uint8_t *ethernet = packet + kVirtioNetHeaderSize;
+  std::copy(dst.begin(), dst.end(), ethernet);
+  std::copy(src.begin(), src.end(), ethernet + 6);
+  write_be16_to_bytes(ethernet + 12, ethertype);
+  std::copy(payload.begin(), payload.end(), ethernet + kEthernetHeaderSize);
 }
 
 inline std::size_t tx_reply_size_for_rx(std::size_t rx_used_len) {
