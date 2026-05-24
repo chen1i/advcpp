@@ -17,6 +17,7 @@
 10_virtio_vfio_pci_caps.cpp  通过 VFIO CONFIG region 解析 virtio PCI capabilities
 11_virtio_vfio_common_cfg.cpp  mmap virtio COMMON_CFG 并读取基础状态
 12_virtio_vfio_queue_info.cpp  写 queue_select 并枚举 virtqueue 状态
+13_virtio_vfio_reset_status.cpp  练习 virtio device_status reset/ACK/DRIVER 状态机
 ```
 
 ## Contents
@@ -41,7 +42,8 @@
 - [18. Sample 10: Virtio PCI capabilities through VFIO](#18-sample-10-virtio-pci-capabilities-through-vfio)
 - [19. Sample 11: Virtio common config through VFIO](#19-sample-11-virtio-common-config-through-vfio)
 - [20. Sample 12: Virtio queue info through VFIO](#20-sample-12-virtio-queue-info-through-vfio)
-- [21. 最小心智模型](#21-最小心智模型)
+- [21. Sample 13: Virtio reset/status through VFIO](#21-sample-13-virtio-resetstatus-through-vfio)
+- [22. 最小心智模型](#22-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -1589,7 +1591,55 @@ notify device
 
 虽然只写 `queue_select`，它仍然是设备寄存器写入，所以真实枚举需要 `--yes`。
 
-## 21. 最小心智模型
+## 21. Sample 13: Virtio reset/status through VFIO
+
+文件：
+
+```text
+userspace_drivers/13_virtio_vfio_reset_status.cpp
+```
+
+virtio 初始化的第一个状态机是 `device_status`：
+
+```text
+0 -> ACKNOWLEDGE -> ACKNOWLEDGE|DRIVER -> feature negotiation -> FEATURES_OK -> DRIVER_OK
+```
+
+sample 13 只练习最前面的安全步骤：
+
+```bash
+./13_virtio_vfio_reset_status_static 0000:c1:00.6 --show
+./13_virtio_vfio_reset_status_static 0000:c1:00.6 --reset --yes
+./13_virtio_vfio_reset_status_static 0000:c1:00.6 --reset --ack-driver --yes
+```
+
+这个 sample 做的事情：
+
+```text
+1. 确认设备当前 driver 是 vfio-pci
+2. 打开 VFIO container/group/device
+3. 解析 virtio COMMON_CFG capability
+4. mmap COMMON_CFG 所在 BAR range
+5. 读取 device_status
+6. 可选写 device_status=0，等待 reset 完成
+7. 可选写 ACKNOWLEDGE，再写 ACKNOWLEDGE|DRIVER
+```
+
+这个 sample 不会：
+
+```text
+协商 feature
+写 FEATURES_OK
+写 DRIVER_OK
+配置 queue
+notify device
+启动 device DMA
+```
+
+`--reset` 会改变真实设备状态，可能清掉之前的 queue/config 状态，所以真实写入需要
+`--yes`。
+
+## 22. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
