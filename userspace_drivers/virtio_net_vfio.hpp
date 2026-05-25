@@ -33,6 +33,7 @@ constexpr std::size_t kVringUsedElemSize = 8;
 constexpr std::size_t kVringUsedAlignSize = 4;
 constexpr std::uint16_t kDefaultRxQueue = 0;
 constexpr std::uint16_t kDefaultTxQueue = 1;
+constexpr std::uint16_t kDefaultCtrlQueue = 2;
 constexpr std::uint16_t kDefaultRxBuffers = 64;
 constexpr std::uint16_t kDefaultTxBuffers = 8;
 constexpr std::size_t kDefaultRxBufferSize = 2048;
@@ -50,6 +51,14 @@ constexpr unsigned VIRTIO_NET_F_MAC = 5;
 constexpr unsigned VIRTIO_NET_F_STATUS = 16;
 constexpr unsigned VIRTIO_NET_F_CTRL_VQ = 17;
 constexpr unsigned VIRTIO_NET_F_CTRL_RX = 18;
+constexpr std::uint8_t kVirtioNetCtrlRx = 0;
+constexpr std::uint8_t kVirtioNetCtrlRxPromisc = 0;
+constexpr std::uint8_t kVirtioNetOk = 0;
+constexpr std::uint8_t kVirtioNetErr = 1;
+constexpr std::size_t kVirtioNetCtrlHdrSize = 2;
+constexpr std::size_t kVirtioNetCtrlStateSize = 1;
+constexpr std::size_t kVirtioNetCtrlAckSize = 1;
+constexpr std::uint8_t kVirtioNetCtrlAckInitial = 0xff;
 constexpr std::size_t kVirtioNetConfigMac = 0;
 constexpr std::size_t kVirtioNetConfigStatus = 6;
 constexpr std::size_t kVirtioNetConfigMaxVirtqueuePairs = 8;
@@ -119,6 +128,22 @@ struct DmaLayout {
   std::size_t tx_buffers_offset = 0;
   std::size_t tx_buffers_size = 0;
   std::size_t tx_buffer_size = 0;
+  std::size_t total_size = 0;
+};
+
+struct CtrlqDmaLayout {
+  VringLayout rx_vring;
+  VringLayout tx_vring;
+  VringLayout ctrl_vring;
+  std::size_t rx_vring_offset = 0;
+  std::size_t tx_vring_offset = 0;
+  std::size_t ctrl_vring_offset = 0;
+  std::size_t rx_buffers_offset = 0;
+  std::size_t rx_buffers_size = 0;
+  std::size_t ctrl_command_offset = 0;
+  std::size_t ctrl_hdr_offset = 0;
+  std::size_t ctrl_state_offset = 0;
+  std::size_t ctrl_ack_offset = 0;
   std::size_t total_size = 0;
 };
 
@@ -312,6 +337,18 @@ inline std::string pci_command_names(std::uint16_t command) {
 inline std::string mac_string(const std::array<std::uint8_t, 6> &mac) {
   return std::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", mac[0],
                      mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+inline std::string on_off(bool value) { return value ? "on" : "off"; }
+
+inline std::string virtio_net_ctrl_ack_name(std::uint8_t ack) {
+  if (ack == kVirtioNetOk)
+    return "OK";
+  if (ack == kVirtioNetErr)
+    return "ERR";
+  if (ack == kVirtioNetCtrlAckInitial)
+    return "not-written";
+  return "unknown";
 }
 
 inline void print_status(std::string_view label, std::uint8_t status) {
@@ -660,6 +697,24 @@ inline std::vector<std::uint32_t> minimal_transport_features(
   return guest;
 }
 
+inline std::vector<std::uint32_t>
+ctrl_rx_guest_features(const std::vector<std::uint32_t> &device_features) {
+  if (!feature_is_set(device_features, VIRTIO_NET_F_CTRL_VQ)) {
+    throw std::runtime_error(
+        "device does not offer VIRTIO_NET_F_CTRL_VQ; no control virtqueue");
+  }
+  if (!feature_is_set(device_features, VIRTIO_NET_F_CTRL_RX)) {
+    throw std::runtime_error(
+        "device does not offer VIRTIO_NET_F_CTRL_RX; cannot send RX mode "
+        "control commands");
+  }
+
+  std::vector<std::uint32_t> guest = minimal_guest_features(device_features);
+  set_feature(guest, VIRTIO_NET_F_CTRL_VQ);
+  set_feature(guest, VIRTIO_NET_F_CTRL_RX);
+  return guest;
+}
+
 inline void write_guest_feature_words(
     MappedRegion &mapping, std::size_t mapping_delta,
     const std::vector<std::uint32_t> &words) {
@@ -675,6 +730,40 @@ inline void write_guest_feature_words(
 
   mapping.write32(mapping_delta + VIRTIO_PCI_COMMON_GFSELECT, original_select);
   std::println("Restored guest_feature_select to {}", original_select);
+}
+
+inline std::vector<std::uint32_t>
+negotiate_ctrl_rx_features(MappedRegion &mapping, std::size_t mapping_delta) {
+  reset_device(mapping, mapping_delta, "after reset");
+
+  write_status(mapping, mapping_delta, VIRTIO_CONFIG_S_ACKNOWLEDGE);
+  print_status("after ACKNOWLEDGE", read_status(mapping, mapping_delta));
+
+  write_status(mapping, mapping_delta,
+               VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
+  print_status("after DRIVER", read_status(mapping, mapping_delta));
+
+  FeatureWords device_features =
+      read_feature_words(mapping, mapping_delta, VIRTIO_PCI_COMMON_DFSELECT,
+                         VIRTIO_PCI_COMMON_DF, kFeatureWords);
+  print_feature_words("Device feature words", device_features.words);
+
+  std::vector<std::uint32_t> guest_features =
+      ctrl_rx_guest_features(device_features.words);
+  print_feature_words("Guest feature words", guest_features);
+  write_guest_feature_words(mapping, mapping_delta, guest_features);
+
+  constexpr std::uint8_t features_ok_status =
+      VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER |
+      VIRTIO_CONFIG_S_FEATURES_OK;
+  write_status(mapping, mapping_delta, features_ok_status);
+
+  std::uint8_t after_features_ok = read_status(mapping, mapping_delta);
+  print_status("after FEATURES_OK", after_features_ok);
+  if (!(after_features_ok & VIRTIO_CONFIG_S_FEATURES_OK))
+    throw std::runtime_error("device rejected FEATURES_OK");
+
+  return guest_features;
 }
 
 inline std::vector<std::uint32_t>
@@ -908,6 +997,55 @@ inline DmaLayout compute_dma_layout(std::uint16_t rx_queue_size,
   return layout;
 }
 
+inline CtrlqDmaLayout compute_ctrlq_dma_layout(
+    std::uint16_t rx_queue_size, std::uint16_t tx_queue_size,
+    std::uint16_t ctrl_queue_size, std::size_t align,
+    std::uint16_t rx_buffers, std::size_t rx_buffer_size) {
+  if (rx_buffers == 0)
+    throw std::runtime_error("rx-buffers must be greater than 0");
+  if (rx_buffers > rx_queue_size) {
+    throw std::runtime_error("rx-buffers must not exceed RX queue_size " +
+                             std::to_string(rx_queue_size));
+  }
+  if (rx_buffer_size == 0)
+    throw std::runtime_error("rx-buffer-size must be greater than 0");
+  if (ctrl_queue_size < 3) {
+    throw std::runtime_error(
+        "control queue-size must be at least 3 for this descriptor chain");
+  }
+
+  CtrlqDmaLayout layout;
+  layout.rx_vring = compute_vring_layout(rx_queue_size, align);
+  layout.tx_vring = compute_vring_layout(tx_queue_size, align);
+  layout.ctrl_vring = compute_vring_layout(ctrl_queue_size, align);
+  layout.rx_vring_offset = 0;
+  layout.tx_vring_offset = round_up_to_page(layout.rx_vring.total_size);
+  layout.ctrl_vring_offset =
+      round_up_to_page(checked_add(layout.tx_vring_offset,
+                                   layout.tx_vring.total_size,
+                                   "TX vring end"));
+  layout.rx_buffers_offset =
+      round_up_to_page(checked_add(layout.ctrl_vring_offset,
+                                   layout.ctrl_vring.total_size,
+                                   "control vring end"));
+  layout.rx_buffers_size =
+      checked_mul(rx_buffers, rx_buffer_size, "RX buffer area");
+  layout.ctrl_command_offset =
+      round_up_to_page(checked_add(layout.rx_buffers_offset,
+                                   layout.rx_buffers_size,
+                                   "RX buffer area end"));
+  layout.ctrl_hdr_offset = layout.ctrl_command_offset;
+  layout.ctrl_state_offset =
+      layout.ctrl_hdr_offset + kVirtioNetCtrlHdrSize;
+  layout.ctrl_ack_offset =
+      layout.ctrl_state_offset + kVirtioNetCtrlStateSize;
+  layout.total_size =
+      round_up_to_page(checked_add(layout.ctrl_ack_offset,
+                                   kVirtioNetCtrlAckSize,
+                                   "control command area"));
+  return layout;
+}
+
 inline void print_dma_layout(const DmaLayout &layout, std::uint64_t base_iova,
                              std::uint16_t rx_buffers,
                              std::size_t rx_buffer_size) {
@@ -954,6 +1092,37 @@ inline void print_dma_layout(const DmaLayout &layout, std::uint64_t base_iova,
   std::println("  TX buffers: {} x {} bytes", tx_buffers,
                layout.tx_buffer_size);
   std::println("  TX buffer bytes: {}", layout.tx_buffers_size);
+  std::println("  mapped bytes: {}", layout.total_size);
+}
+
+inline void print_ctrlq_dma_layout(const CtrlqDmaLayout &layout,
+                                   std::uint64_t base_iova,
+                                   std::uint16_t rx_buffers,
+                                   std::size_t rx_buffer_size) {
+  std::println("DMA memory layout:");
+  std::println("  RX vring offset: 0x{:x}", layout.rx_vring_offset);
+  std::println("  RX vring IOVA: 0x{:x}", base_iova + layout.rx_vring_offset);
+  std::println("  RX vring bytes: {}", layout.rx_vring.total_size);
+  std::println("  TX vring offset: 0x{:x}", layout.tx_vring_offset);
+  std::println("  TX vring IOVA: 0x{:x}", base_iova + layout.tx_vring_offset);
+  std::println("  TX vring bytes: {}", layout.tx_vring.total_size);
+  std::println("  control vring offset: 0x{:x}", layout.ctrl_vring_offset);
+  std::println("  control vring IOVA: 0x{:x}",
+               base_iova + layout.ctrl_vring_offset);
+  std::println("  control vring bytes: {}", layout.ctrl_vring.total_size);
+  std::println("  RX buffers offset: 0x{:x}", layout.rx_buffers_offset);
+  std::println("  RX buffers IOVA: 0x{:x}",
+               base_iova + layout.rx_buffers_offset);
+  std::println("  RX buffers: {} x {} bytes", rx_buffers, rx_buffer_size);
+  std::println("  RX buffer bytes: {}", layout.rx_buffers_size);
+  std::println("  control command offset: 0x{:x}",
+               layout.ctrl_command_offset);
+  std::println("  control header IOVA: 0x{:x}",
+               base_iova + layout.ctrl_hdr_offset);
+  std::println("  control state IOVA: 0x{:x}",
+               base_iova + layout.ctrl_state_offset);
+  std::println("  control ACK IOVA: 0x{:x}",
+               base_iova + layout.ctrl_ack_offset);
   std::println("  mapped bytes: {}", layout.total_size);
 }
 
@@ -1079,6 +1248,40 @@ inline void publish_tx_packet(std::uint8_t *tx_queue_base,
   std::atomic_thread_fence(std::memory_order_release);
   *vring_avail_idx(tx_queue_base, tx_layout) =
       static_cast<std::uint16_t>(avail_idx + 1);
+  std::atomic_thread_fence(std::memory_order_release);
+}
+
+inline void publish_rx_promisc_control_command(
+    std::uint8_t *ctrl_queue_base, std::uint8_t *dma_base,
+    const CtrlqDmaLayout &layout, std::uint64_t base_iova, bool promisc) {
+  std::uint8_t *header = dma_base + layout.ctrl_hdr_offset;
+  std::uint8_t *state = dma_base + layout.ctrl_state_offset;
+  std::uint8_t *ack = dma_base + layout.ctrl_ack_offset;
+
+  header[0] = kVirtioNetCtrlRx;
+  header[1] = kVirtioNetCtrlRxPromisc;
+  state[0] = promisc ? 1 : 0;
+  ack[0] = kVirtioNetCtrlAckInitial;
+
+  VringDesc *desc = vring_descs(ctrl_queue_base, layout.ctrl_vring);
+  desc[0].addr = base_iova + layout.ctrl_hdr_offset;
+  desc[0].len = kVirtioNetCtrlHdrSize;
+  desc[0].flags = kVringDescFNext;
+  desc[0].next = 1;
+  desc[1].addr = base_iova + layout.ctrl_state_offset;
+  desc[1].len = kVirtioNetCtrlStateSize;
+  desc[1].flags = kVringDescFNext;
+  desc[1].next = 2;
+  desc[2].addr = base_iova + layout.ctrl_ack_offset;
+  desc[2].len = kVirtioNetCtrlAckSize;
+  desc[2].flags = kVringDescFWrite;
+  desc[2].next = 0;
+
+  std::uint16_t *avail_ring = vring_avail_ring(ctrl_queue_base,
+                                               layout.ctrl_vring);
+  avail_ring[0] = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  *vring_avail_idx(ctrl_queue_base, layout.ctrl_vring) = 1;
   std::atomic_thread_fence(std::memory_order_release);
 }
 

@@ -1,29 +1,34 @@
-// Exercise 27: Send a virtio-net control virtqueue command through VFIO
+// Exercise 28: Observe RX behavior after a virtio-net promisc control command
 //
-// Goal: configure RX queue 0, TX queue 1, and the virtio-net control queue,
-// then send VIRTIO_NET_CTRL_RX_PROMISC through the control virtqueue and read
-// the device's ACK byte.
+// Goal: set RX promiscuous mode through the control virtqueue, keep the device
+// running, and observe whether frames whose destination MAC is not the VF MAC
+// are returned through the RX used ring.
 //
 // Background
 // ----------
-// The previous virtio-net samples used only queue 0 (RX) and queue 1 (TX).
-// This device reports num_queues=3 because it also offers
-// VIRTIO_NET_F_CTRL_VQ: queue 2 is the control virtqueue.
+// Exercise 27 proved that the control virtqueue accepts RX_PROMISC on/off and
+// returns VIRTIO_NET_OK.  This sample keeps the device alive after that ACK:
 //
-// Control virtqueue commands are descriptor chains:
+//   configure RX queue 0
+//   configure TX queue 1
+//   configure control queue 2
+//   publish RX buffers
+//   publish RX_PROMISC control command
+//   write DRIVER_OK
+//   notify RX and control queues
+//   wait for control ACK
+//   continue polling RX used.idx until packets arrive or timeout expires
 //
-//   readable control header -> readable command data -> writable ACK byte
-//
-// This sample negotiates VIRTIO_NET_F_CTRL_VQ and VIRTIO_NET_F_CTRL_RX, sends
-// the RX promiscuous-mode command, waits for the control used ring, prints the
-// ACK, then resets the device so the mode change is not left behind.
+// To see the difference, run with --promisc on and send a raw Ethernet frame
+// from another VF to an unknown destination MAC.  Then repeat with
+// --promisc off.  The control command itself resets on exit, so each run is
+// self-contained.
 //
 // New concepts
 // ------------
-// - Negotiating virtio-net control virtqueue features
-// - Programming the third queue as the control virtqueue
-// - Publishing a descriptor chain with NEXT and WRITE flags
-// - Reading the control ACK byte written by the device
+// - Keeping a control-command side effect active during RX observation
+// - Comparing received Ethernet destination MAC against the VF's config MAC
+// - Recycling RX buffers in an observe-only loop
 
 #include <array>
 #include <atomic>
@@ -32,7 +37,6 @@
 #include <filesystem>
 #include <format>
 #include <iostream>
-#include <limits>
 #include <linux/vfio.h>
 #include <optional>
 #include <print>
@@ -45,39 +49,22 @@
 
 namespace fs = std::filesystem;
 
-constexpr std::size_t kCtrlHdrSize = 2;
-constexpr std::size_t kCtrlStateSize = 1;
-constexpr std::size_t kCtrlAckSize = 1;
-constexpr std::uint8_t kCtrlAckInitial = 0xff;
-
 struct Options {
   std::uint16_t rx_queue = kDefaultRxQueue;
   std::uint16_t tx_queue = kDefaultTxQueue;
-  std::uint16_t ctrl_queue = 2;
+  std::uint16_t ctrl_queue = kDefaultCtrlQueue;
   std::optional<std::uint16_t> queue_size;
   std::uint64_t iova = 0x100000000ull;
   std::size_t align = 4096;
   std::uint16_t rx_buffers = kDefaultRxBuffers;
   std::size_t rx_buffer_size = kDefaultRxBufferSize;
-  std::uint32_t wait_ms = 5000;
+  std::uint32_t wait_ms = 60000;
+  std::uint16_t stop_after = 1;
+  std::size_t dump_bytes = kDefaultDumpBytes;
+  std::optional<std::uint16_t> match_ethertype = kDefaultEthertype;
   bool promisc = true;
+  bool dump_every_packet = false;
   bool yes = false;
-};
-
-struct ControlDmaLayout {
-  VringLayout rx_vring;
-  VringLayout tx_vring;
-  VringLayout ctrl_vring;
-  std::size_t rx_vring_offset = 0;
-  std::size_t tx_vring_offset = 0;
-  std::size_t ctrl_vring_offset = 0;
-  std::size_t rx_buffers_offset = 0;
-  std::size_t rx_buffers_size = 0;
-  std::size_t ctrl_command_offset = 0;
-  std::size_t ctrl_hdr_offset = 0;
-  std::size_t ctrl_state_offset = 0;
-  std::size_t ctrl_ack_offset = 0;
-  std::size_t total_size = 0;
 };
 
 static void usage(const char *argv0) {
@@ -87,8 +74,11 @@ static void usage(const char *argv0) {
       "  {} <BDF> [--rx-queue <n>] [--tx-queue <n>] [--ctrl-queue <n>]\n"
       "       [--queue-size <n>] [--rx-buffers <n>]\n"
       "       [--rx-buffer-size <bytes>] [--iova <addr>]\n"
-      "       [--align <bytes>] [--wait-ms <n>]\n"
-      "       [--promisc on|off] [--dry-run|--yes]\n\n"
+      "       [--align <bytes>] [--wait-ms <n>] [--stop-after <n>]\n"
+      "       [--promisc on|off]\n"
+      "       [--match-ethertype <hex>|--accept-any-ethertype]\n"
+      "       [--dump-bytes <n>] [--dump-every-packet]\n"
+      "       [--dry-run|--yes]\n\n"
       "Defaults:\n"
       "  rx-queue = 0\n"
       "  tx-queue = 1\n"
@@ -98,13 +88,17 @@ static void usage(const char *argv0) {
       "  rx-buffer-size = 2048\n"
       "  iova = 0x100000000\n"
       "  align = 4096\n"
-      "  wait-ms = 5000\n"
+      "  wait-ms = 60000\n"
+      "  stop-after = 1\n"
       "  promisc = on\n"
+      "  match-ethertype = 0x88b5\n"
+      "  dump-bytes = 160\n"
+      "  dump-every-packet = false\n"
       "  default mode = dry-run\n\n"
       "Examples:\n"
       "  {} c1:00.6\n"
-      "  {} c1:00.6 --promisc on --yes\n"
-      "  {} c1:00.6 --queue-size 128 --promisc off --yes",
+      "  {} c1:00.6 --promisc on --wait-ms 60000 --yes\n"
+      "  {} c1:00.6 --promisc off --wait-ms 10000 --yes",
       argv0, argv0, argv0, argv0);
 }
 
@@ -117,165 +111,16 @@ static bool parse_on_off(std::string_view text, std::string_view name) {
                            std::string(text));
 }
 
-static ControlDmaLayout
-compute_control_dma_layout(std::uint16_t rx_queue_size,
-                           std::uint16_t tx_queue_size,
-                           std::uint16_t ctrl_queue_size, std::size_t align,
-                           std::uint16_t rx_buffers,
-                           std::size_t rx_buffer_size) {
-  if (rx_buffers == 0)
-    throw std::runtime_error("rx-buffers must be greater than 0");
-  if (rx_buffers > rx_queue_size) {
-    throw std::runtime_error("rx-buffers must not exceed RX queue_size " +
-                             std::to_string(rx_queue_size));
-  }
-  if (rx_buffer_size == 0)
-    throw std::runtime_error("rx-buffer-size must be greater than 0");
-  if (ctrl_queue_size < 3) {
-    throw std::runtime_error(
-        "control queue-size must be at least 3 for this descriptor chain");
-  }
-
-  ControlDmaLayout layout;
-  layout.rx_vring = compute_vring_layout(rx_queue_size, align);
-  layout.tx_vring = compute_vring_layout(tx_queue_size, align);
-  layout.ctrl_vring = compute_vring_layout(ctrl_queue_size, align);
-  layout.rx_vring_offset = 0;
-  layout.tx_vring_offset = round_up_to_page(layout.rx_vring.total_size);
-  layout.ctrl_vring_offset =
-      round_up_to_page(checked_add(layout.tx_vring_offset,
-                                   layout.tx_vring.total_size,
-                                   "TX vring end"));
-  layout.rx_buffers_offset =
-      round_up_to_page(checked_add(layout.ctrl_vring_offset,
-                                   layout.ctrl_vring.total_size,
-                                   "control vring end"));
-  layout.rx_buffers_size =
-      checked_mul(rx_buffers, rx_buffer_size, "RX buffer area");
-  layout.ctrl_command_offset =
-      round_up_to_page(checked_add(layout.rx_buffers_offset,
-                                   layout.rx_buffers_size,
-                                   "RX buffer area end"));
-  layout.ctrl_hdr_offset = layout.ctrl_command_offset;
-  layout.ctrl_state_offset = layout.ctrl_hdr_offset + kCtrlHdrSize;
-  layout.ctrl_ack_offset = layout.ctrl_state_offset + kCtrlStateSize;
-  layout.total_size =
-      round_up_to_page(checked_add(layout.ctrl_ack_offset, kCtrlAckSize,
-                                   "control command area"));
-  return layout;
-}
-
-static void print_control_dma_layout(const ControlDmaLayout &layout,
-                                     std::uint64_t base_iova,
-                                     std::uint16_t rx_buffers,
-                                     std::size_t rx_buffer_size) {
-  std::println("DMA memory layout:");
-  std::println("  RX vring offset: 0x{:x}", layout.rx_vring_offset);
-  std::println("  RX vring IOVA: 0x{:x}", base_iova + layout.rx_vring_offset);
-  std::println("  RX vring bytes: {}", layout.rx_vring.total_size);
-  std::println("  TX vring offset: 0x{:x}", layout.tx_vring_offset);
-  std::println("  TX vring IOVA: 0x{:x}", base_iova + layout.tx_vring_offset);
-  std::println("  TX vring bytes: {}", layout.tx_vring.total_size);
-  std::println("  control vring offset: 0x{:x}", layout.ctrl_vring_offset);
-  std::println("  control vring IOVA: 0x{:x}",
-               base_iova + layout.ctrl_vring_offset);
-  std::println("  control vring bytes: {}", layout.ctrl_vring.total_size);
-  std::println("  RX buffers offset: 0x{:x}", layout.rx_buffers_offset);
-  std::println("  RX buffers IOVA: 0x{:x}",
-               base_iova + layout.rx_buffers_offset);
-  std::println("  RX buffers: {} x {} bytes", rx_buffers, rx_buffer_size);
-  std::println("  RX buffer bytes: {}", layout.rx_buffers_size);
-  std::println("  control command offset: 0x{:x}",
-               layout.ctrl_command_offset);
-  std::println("  control header IOVA: 0x{:x}",
-               base_iova + layout.ctrl_hdr_offset);
-  std::println("  control state IOVA: 0x{:x}",
-               base_iova + layout.ctrl_state_offset);
-  std::println("  control ACK IOVA: 0x{:x}",
-               base_iova + layout.ctrl_ack_offset);
-  std::println("  mapped bytes: {}", layout.total_size);
-}
-
-static std::vector<std::uint32_t>
-negotiate_control_features(MappedRegion &mapping, std::size_t mapping_delta) {
-  reset_device(mapping, mapping_delta, "after reset");
-
-  write_status(mapping, mapping_delta, VIRTIO_CONFIG_S_ACKNOWLEDGE);
-  print_status("after ACKNOWLEDGE", read_status(mapping, mapping_delta));
-
-  write_status(mapping, mapping_delta,
-               VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
-  print_status("after DRIVER", read_status(mapping, mapping_delta));
-
-  FeatureWords device_features =
-      read_feature_words(mapping, mapping_delta, VIRTIO_PCI_COMMON_DFSELECT,
-                         VIRTIO_PCI_COMMON_DF, kFeatureWords);
-  print_feature_words("Device feature words", device_features.words);
-
-  if (!feature_is_set(device_features.words, VIRTIO_NET_F_CTRL_VQ)) {
-    throw std::runtime_error(
-        "device does not offer VIRTIO_NET_F_CTRL_VQ; no control virtqueue");
-  }
-  if (!feature_is_set(device_features.words, VIRTIO_NET_F_CTRL_RX)) {
-    throw std::runtime_error(
-        "device does not offer VIRTIO_NET_F_CTRL_RX; cannot send RX mode "
-        "control commands");
-  }
-
-  std::vector<std::uint32_t> guest_features =
-      minimal_guest_features(device_features.words);
-  set_feature(guest_features, VIRTIO_NET_F_CTRL_VQ);
-  set_feature(guest_features, VIRTIO_NET_F_CTRL_RX);
-  print_feature_words("Guest feature words", guest_features);
-  write_guest_feature_words(mapping, mapping_delta, guest_features);
-
-  constexpr std::uint8_t features_ok_status =
-      VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER |
-      VIRTIO_CONFIG_S_FEATURES_OK;
-  write_status(mapping, mapping_delta, features_ok_status);
-
-  std::uint8_t after_features_ok = read_status(mapping, mapping_delta);
-  print_status("after FEATURES_OK", after_features_ok);
-  if (!(after_features_ok & VIRTIO_CONFIG_S_FEATURES_OK))
-    throw std::runtime_error("device rejected FEATURES_OK");
-
-  return guest_features;
-}
-
-static void publish_promisc_control_command(std::uint8_t *ctrl_queue_base,
-                                            std::uint8_t *dma_base,
-                                            const ControlDmaLayout &layout,
-                                            std::uint64_t base_iova,
-                                            bool promisc) {
-  std::uint8_t *header = dma_base + layout.ctrl_hdr_offset;
-  std::uint8_t *state = dma_base + layout.ctrl_state_offset;
-  std::uint8_t *ack = dma_base + layout.ctrl_ack_offset;
-
-  header[0] = kVirtioNetCtrlRx;
-  header[1] = kVirtioNetCtrlRxPromisc;
-  state[0] = promisc ? 1 : 0;
-  ack[0] = kCtrlAckInitial;
-
-  VringDesc *desc = vring_descs(ctrl_queue_base, layout.ctrl_vring);
-  desc[0].addr = base_iova + layout.ctrl_hdr_offset;
-  desc[0].len = kCtrlHdrSize;
-  desc[0].flags = kVringDescFNext;
-  desc[0].next = 1;
-  desc[1].addr = base_iova + layout.ctrl_state_offset;
-  desc[1].len = kCtrlStateSize;
-  desc[1].flags = kVringDescFNext;
-  desc[1].next = 2;
-  desc[2].addr = base_iova + layout.ctrl_ack_offset;
-  desc[2].len = kCtrlAckSize;
-  desc[2].flags = kVringDescFWrite;
-  desc[2].next = 0;
-
-  std::uint16_t *avail_ring = vring_avail_ring(ctrl_queue_base,
-                                               layout.ctrl_vring);
-  avail_ring[0] = 0;
-  std::atomic_thread_fence(std::memory_order_release);
-  *vring_avail_idx(ctrl_queue_base, layout.ctrl_vring) = 1;
-  std::atomic_thread_fence(std::memory_order_release);
+static DmaLayout rx_view_layout(const CtrlqDmaLayout &layout) {
+  DmaLayout view;
+  view.rx_vring = layout.rx_vring;
+  view.tx_vring = layout.tx_vring;
+  view.rx_vring_offset = layout.rx_vring_offset;
+  view.tx_vring_offset = layout.tx_vring_offset;
+  view.rx_buffers_offset = layout.rx_buffers_offset;
+  view.rx_buffers_size = layout.rx_buffers_size;
+  view.total_size = layout.total_size;
+  return view;
 }
 
 static void print_notify_target(std::string_view label, const VirtioCap &notify,
@@ -287,55 +132,6 @@ static void print_notify_target(std::string_view label, const VirtioCap &notify,
                mmap_offset + static_cast<off_t>(delta));
   std::println("  mmap file offset: 0x{:x}", mmap_offset);
   std::println("  mmap delta: 0x{:x}", delta);
-}
-
-static void dry_run(const std::string &bdf, const fs::path &dev_dir,
-                    const Options &options) {
-  require_vfio_driver(dev_dir);
-
-  DriverInfo driver = current_driver(dev_dir);
-  std::println("BDF: {}", bdf);
-  std::println("driver: {}", driver.name);
-  std::println("RX queue: {}", options.rx_queue);
-  std::println("TX queue: {}", options.tx_queue);
-  std::println("control queue: {}", options.ctrl_queue);
-  std::println("base IOVA: 0x{:x}", options.iova);
-  std::println("vring alignment: {}", options.align);
-  std::println("RX buffers: {} x {} bytes", options.rx_buffers,
-               options.rx_buffer_size);
-  std::println("wait-ms: {}", options.wait_ms);
-  std::println("promisc: {}", on_off(options.promisc));
-
-  if (options.queue_size) {
-    ControlDmaLayout layout = compute_control_dma_layout(
-        *options.queue_size, *options.queue_size, *options.queue_size,
-        options.align, options.rx_buffers, options.rx_buffer_size);
-    print_control_dma_layout(layout, options.iova, options.rx_buffers,
-                             options.rx_buffer_size);
-  } else {
-    std::println("queue_size: each target queue's device-reported size");
-  }
-
-  std::println("Would open VFIO container/group/device");
-  std::println("Would enable PCI Memory Space and Bus Master in CONFIG if "
-               "needed");
-  std::println("Would mmap virtio COMMON_CFG writable");
-  std::println("Would mmap virtio DEVICE_CFG read-only");
-  std::println("Would reset device and negotiate FEATURES_OK with "
-               "VIRTIO_NET_F_CTRL_VQ and VIRTIO_NET_F_CTRL_RX");
-  std::println("Would inspect RX queue {}, TX queue {}, and control queue {}",
-               options.rx_queue, options.tx_queue, options.ctrl_queue);
-  std::println("Would allocate and VFIO-map one DMA area for three vrings, RX "
-               "buffers, and the control command");
-  std::println("Would publish RX buffers");
-  std::println("Would publish control descriptor chain: header -> state -> "
-               "ACK");
-  std::println("Would enable RX/TX/control queues");
-  std::println("Would write DRIVER_OK, notify RX, notify control queue, and "
-               "wait up to {} ms for control completion",
-               options.wait_ms);
-  std::println("Would print control ACK and reset the device before exit");
-  std::println("Pass --yes to perform these device and DMA writes.");
 }
 
 static QueueView inspect_and_choose_queue(
@@ -359,7 +155,86 @@ static QueueView inspect_and_choose_queue(
   return view;
 }
 
-static void run_control_command(const std::string &bdf,
+static std::uint8_t wait_for_control_ack(std::uint8_t *dma_base,
+                                         std::uint8_t *ctrl_queue_base,
+                                         const CtrlqDmaLayout &layout,
+                                         std::uint16_t base_idx,
+                                         std::uint32_t wait_ms) {
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::uint16_t current = read_used_idx(ctrl_queue_base, layout.ctrl_vring);
+    if (used_delta(base_idx, current) >= 1)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  std::uint16_t after = read_used_idx(ctrl_queue_base, layout.ctrl_vring);
+  std::println("control used.idx after wait: {} (delta {})", after,
+               used_delta(base_idx, after));
+  print_used_entries("control", ctrl_queue_base, layout.ctrl_vring, base_idx,
+                     after);
+
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return *(dma_base + layout.ctrl_ack_offset);
+}
+
+static void dry_run(const std::string &bdf, const fs::path &dev_dir,
+                    const Options &options) {
+  require_vfio_driver(dev_dir);
+
+  DriverInfo driver = current_driver(dev_dir);
+  std::println("BDF: {}", bdf);
+  std::println("driver: {}", driver.name);
+  std::println("RX queue: {}", options.rx_queue);
+  std::println("TX queue: {}", options.tx_queue);
+  std::println("control queue: {}", options.ctrl_queue);
+  std::println("base IOVA: 0x{:x}", options.iova);
+  std::println("vring alignment: {}", options.align);
+  std::println("RX buffers: {} x {} bytes", options.rx_buffers,
+               options.rx_buffer_size);
+  std::println("wait-ms: {}", options.wait_ms);
+  std::println("stop-after: {} matching RX packets", options.stop_after);
+  std::println("promisc: {}", on_off(options.promisc));
+  std::println("match ethertype: {}",
+               options.match_ethertype
+                   ? std::format("0x{:04x}", *options.match_ethertype)
+                   : std::string("any"));
+  std::println("dump-bytes: {}", options.dump_bytes);
+  std::println("dump-every-packet: {}",
+               options.dump_every_packet ? "yes" : "no");
+
+  if (options.queue_size) {
+    CtrlqDmaLayout layout = compute_ctrlq_dma_layout(
+        *options.queue_size, *options.queue_size, *options.queue_size,
+        options.align, options.rx_buffers, options.rx_buffer_size);
+    print_ctrlq_dma_layout(layout, options.iova, options.rx_buffers,
+                           options.rx_buffer_size);
+  } else {
+    std::println("queue_size: each target queue's device-reported size");
+  }
+
+  std::println("Would open VFIO container/group/device");
+  std::println("Would enable PCI Memory Space and Bus Master in CONFIG if "
+               "needed");
+  std::println("Would mmap virtio COMMON_CFG writable");
+  std::println("Would mmap virtio DEVICE_CFG read-only");
+  std::println("Would reset device and negotiate FEATURES_OK with "
+               "VIRTIO_NET_F_CTRL_VQ and VIRTIO_NET_F_CTRL_RX");
+  std::println("Would publish RX buffers and an RX_PROMISC={} control command",
+               on_off(options.promisc));
+  std::println("Would enable RX/TX/control queues");
+  std::println("Would write DRIVER_OK, notify RX, notify control, wait for "
+               "control ACK, then observe RX for {} ms",
+               options.wait_ms);
+  std::println("Would print whether each RX packet's destination MAC matches "
+               "the VF config MAC");
+  std::println("Would reset the device before exit, so promisc state does not "
+               "persist");
+  std::println("Pass --yes to perform these device and DMA writes.");
+}
+
+static void run_promisc_observe(const std::string &bdf,
                                 const fs::path &dev_dir,
                                 const Options &options) {
   require_vfio_driver(dev_dir);
@@ -375,7 +250,15 @@ static void run_control_command(const std::string &bdf,
   std::println("RX buffers: {} x {} bytes", options.rx_buffers,
                options.rx_buffer_size);
   std::println("wait-ms: {}", options.wait_ms);
+  std::println("stop-after: {} matching RX packets", options.stop_after);
   std::println("control command: RX_PROMISC={}", on_off(options.promisc));
+  std::println("match ethertype: {}",
+               options.match_ethertype
+                   ? std::format("0x{:04x}", *options.match_ethertype)
+                   : std::string("any"));
+  std::println("dump-bytes: {}", options.dump_bytes);
+  std::println("dump-every-packet: {}",
+               options.dump_every_packet ? "yes" : "no");
 
   std::size_t page_size = static_cast<std::size_t>(system_page_size());
   if (options.iova % page_size != 0) {
@@ -415,7 +298,7 @@ static void run_control_command(const std::string &bdf,
   print_status("initial device_status",
                read_status(common_mapping, mapping_delta));
   std::vector<std::uint32_t> guest_features =
-      negotiate_control_features(common_mapping, mapping_delta);
+      negotiate_ctrl_rx_features(common_mapping, mapping_delta);
 
   VirtioNetConfigView net_config = read_virtio_net_config(
       device_cfg_mapping, device_cfg_delta, device_cfg.length);
@@ -456,11 +339,12 @@ static void run_control_command(const std::string &bdf,
                            options.ctrl_queue, "control queue",
                            options.queue_size, ctrl_queue_size);
 
-  ControlDmaLayout layout = compute_control_dma_layout(
+  CtrlqDmaLayout layout = compute_ctrlq_dma_layout(
       rx_queue_size, tx_queue_size, ctrl_queue_size, options.align,
       options.rx_buffers, options.rx_buffer_size);
-  print_control_dma_layout(layout, options.iova, options.rx_buffers,
-                           options.rx_buffer_size);
+  DmaLayout rx_layout = rx_view_layout(layout);
+  print_ctrlq_dma_layout(layout, options.iova, options.rx_buffers,
+                         options.rx_buffer_size);
 
   AnonymousBuffer buffer(layout.total_size);
   buffer.zero();
@@ -495,14 +379,14 @@ static void run_control_command(const std::string &bdf,
   std::println("Initial TX used.idx: {}",
                read_used_idx(tx_queue_base, layout.tx_vring));
 
-  publish_promisc_control_command(ctrl_queue_base, buffer.data(), layout,
-                                  options.iova, options.promisc);
+  publish_rx_promisc_control_command(ctrl_queue_base, buffer.data(), layout,
+                                     options.iova, options.promisc);
   std::println("Published control descriptor chain:");
   std::println("  desc 0: control header class={} cmd={}", kVirtioNetCtrlRx,
                kVirtioNetCtrlRxPromisc);
   std::println("  desc 1: RX_PROMISC state={}", options.promisc ? 1 : 0);
   std::println("  desc 2: writable ACK byte initialized to 0x{:02x}",
-               kCtrlAckInitial);
+               kVirtioNetCtrlAckInitial);
   std::println("control avail.idx: {}",
                static_cast<std::uint16_t>(
                    *vring_avail_idx(ctrl_queue_base, layout.ctrl_vring)));
@@ -557,6 +441,8 @@ static void run_control_command(const std::string &bdf,
 
   std::uint16_t ctrl_used_base_idx =
       read_used_idx(ctrl_queue_base, layout.ctrl_vring);
+  std::uint16_t last_rx_used_idx =
+      read_used_idx(rx_queue_base, layout.rx_vring);
   std::atomic_thread_fence(std::memory_order_release);
   set_driver_ok(common_mapping, mapping_delta);
   print_status("after DRIVER_OK", read_status(common_mapping, mapping_delta));
@@ -567,47 +453,100 @@ static void run_control_command(const std::string &bdf,
   std::println("Wrote one 16-bit control notify value");
   std::println("Waiting up to {} ms for control completion", options.wait_ms);
 
-  if (options.wait_ms > 0) {
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(options.wait_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-      std::uint16_t current =
-          read_used_idx(ctrl_queue_base, layout.ctrl_vring);
-      if (used_delta(ctrl_used_base_idx, current) >= 1)
-        break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-  }
-
-  std::uint16_t ctrl_used_after_wait =
-      read_used_idx(ctrl_queue_base, layout.ctrl_vring);
-  std::println("control used.idx after wait: {} (delta {})",
-               ctrl_used_after_wait,
-               used_delta(ctrl_used_base_idx, ctrl_used_after_wait));
-
-  if (used_delta(ctrl_used_base_idx, ctrl_used_after_wait) >= 1) {
-    const volatile VringUsedElem *elems =
-        vring_used_elems(ctrl_queue_base, layout.ctrl_vring);
-    std::uint16_t used_slot =
-        ctrl_used_base_idx % layout.ctrl_vring.queue_size;
-    std::uint32_t id = static_cast<std::uint32_t>(elems[used_slot].id);
-    std::uint32_t len = static_cast<std::uint32_t>(elems[used_slot].len);
-    std::println("control used entry:");
-    std::println("  slot: {}", used_slot);
-    std::println("  id: {}", id);
-    std::println("  len: {}", len);
-  } else {
-    std::println("control used entries: <none>");
-  }
-
-  std::atomic_thread_fence(std::memory_order_acquire);
-  std::uint8_t ack = *(buffer.data() + layout.ctrl_ack_offset);
+  std::uint8_t ack =
+      wait_for_control_ack(buffer.data(), ctrl_queue_base, layout,
+                           ctrl_used_base_idx, options.wait_ms);
   std::println("control ACK byte: 0x{:02x} ({})", ack,
                virtio_net_ctrl_ack_name(ack));
-  if (ack != kVirtioNetOk) {
-    std::println("Control command did not return VIRTIO_NET_OK");
+  if (ack != kVirtioNetOk)
+    throw std::runtime_error("control command did not return VIRTIO_NET_OK");
+
+  std::println("Promisc command accepted; observing RX for up to {} ms",
+               options.wait_ms);
+  std::println("VF config MAC: {}", mac_string(net_config.mac));
+
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(options.wait_ms);
+  std::uint16_t matched = 0;
+  std::uint32_t skipped = 0;
+  while (matched < options.stop_after &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::uint16_t current_rx_used =
+        read_used_idx(rx_queue_base, layout.rx_vring);
+    std::uint16_t count = used_delta(last_rx_used_idx, current_rx_used);
+    if (count == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+
+    const volatile VringUsedElem *elems =
+        vring_used_elems(rx_queue_base, layout.rx_vring);
+    for (std::uint16_t i = 0; i < count; ++i) {
+      std::uint16_t used_slot = static_cast<std::uint16_t>(
+          (last_rx_used_idx + i) % layout.rx_vring.queue_size);
+      std::uint32_t id = static_cast<std::uint32_t>(elems[used_slot].id);
+      std::uint32_t len = static_cast<std::uint32_t>(elems[used_slot].len);
+
+      std::optional<ReceivedPacket> received = read_rx_used_packet(
+          buffer.data(), rx_queue_base, rx_layout, used_slot,
+          options.rx_buffers, options.rx_buffer_size, options.match_ethertype);
+
+      if (!received) {
+        ++skipped;
+        if (id < options.rx_buffers) {
+          recycle_rx_buffer(rx_queue_base, layout.rx_vring,
+                            static_cast<std::uint16_t>(id));
+          write_notify(rx_notify_mapping, rx_notify_delta, rx_notify_value);
+        }
+        continue;
+      }
+
+      const std::uint8_t *ethernet =
+          received->buffer + kVirtioNetHeaderSize;
+      std::array<std::uint8_t, 6> dst = mac_from_bytes(ethernet);
+      std::array<std::uint8_t, 6> src = mac_from_bytes(ethernet + 6);
+      bool dst_is_vf_mac = dst == net_config.mac;
+
+      ++matched;
+      std::println("Observed RX packet {}:", matched);
+      std::println("  used slot: {}", used_slot);
+      std::println("  desc id: {}", received->desc_id);
+      std::println("  used len: {}", received->used_len);
+      std::println("  Ethernet dst: {}", mac_string(dst));
+      std::println("  Ethernet src: {}", mac_string(src));
+      std::println("  ethertype: 0x{:04x}", received->ethertype);
+      std::println("  dst matches VF MAC: {}",
+                   dst_is_vf_mac ? "yes" : "no");
+      if (!dst_is_vf_mac && options.promisc) {
+        std::println("  this is the expected promisc-path observation");
+      }
+      if ((matched == 1 || options.dump_every_packet) &&
+          options.dump_bytes > 0) {
+        std::println("RX buffer dump:");
+        print_virtio_net_rx_buffer(received->buffer, received->used_len,
+                                   options.dump_bytes);
+      }
+
+      recycle_rx_buffer(rx_queue_base, layout.rx_vring,
+                        static_cast<std::uint16_t>(received->desc_id));
+      write_notify(rx_notify_mapping, rx_notify_delta, rx_notify_value);
+
+      if (matched >= options.stop_after)
+        break;
+    }
+
+    last_rx_used_idx = current_rx_used;
   }
-  print_status("after wait", read_status(common_mapping, mapping_delta));
+
+  std::println("Promisc observe summary:");
+  std::println("  matching RX packets: {}", matched);
+  std::println("  skipped RX used entries: {}", skipped);
+  std::println("  final RX avail.idx: {}",
+               static_cast<std::uint16_t>(
+                   *vring_avail_idx(rx_queue_base, layout.rx_vring)));
+  std::println("  final RX used.idx: {}",
+               read_used_idx(rx_queue_base, layout.rx_vring));
+  print_status("after observe", read_status(common_mapping, mapping_delta));
 
   selection.restore();
   std::println("Restored queue_select to {}", original_select);
@@ -619,7 +558,7 @@ static void run_control_command(const std::string &bdf,
   std::uint64_t unmapped = dma.unmap();
   std::println("Unmapped IOVA 0x{:x}; kernel reported {} bytes unmapped",
                options.iova, unmapped);
-  std::println("Control command sample cleaned up the device.");
+  std::println("Promisc observe sample cleaned up the device.");
 }
 
 int main(int argc, char *argv[]) {
@@ -658,8 +597,19 @@ int main(int argc, char *argv[]) {
         options.align = static_cast<std::size_t>(parse_ull(argv[++i], "align"));
       } else if (arg == "--wait-ms" && i + 1 < argc) {
         options.wait_ms = parse_u32(argv[++i], "wait-ms");
+      } else if (arg == "--stop-after" && i + 1 < argc) {
+        options.stop_after = parse_u16(argv[++i], "stop-after");
       } else if (arg == "--promisc" && i + 1 < argc) {
         options.promisc = parse_on_off(argv[++i], "promisc");
+      } else if (arg == "--match-ethertype" && i + 1 < argc) {
+        options.match_ethertype = parse_u16(argv[++i], "match-ethertype");
+      } else if (arg == "--accept-any-ethertype") {
+        options.match_ethertype.reset();
+      } else if (arg == "--dump-bytes" && i + 1 < argc) {
+        options.dump_bytes =
+            static_cast<std::size_t>(parse_ull(argv[++i], "dump-bytes"));
+      } else if (arg == "--dump-every-packet") {
+        options.dump_every_packet = true;
       } else if (arg == "--dry-run") {
         options.yes = false;
       } else if (arg == "--yes") {
@@ -675,12 +625,13 @@ int main(int argc, char *argv[]) {
       throw std::runtime_error(
           "align must be a power of two and at least 4 bytes");
     }
-
     if (options.wait_ms == 0)
       throw std::runtime_error("wait-ms must be greater than 0");
+    if (options.stop_after == 0)
+      throw std::runtime_error("stop-after must be greater than 0");
 
     if (options.yes)
-      run_control_command(bdf, dev_dir, options);
+      run_promisc_observe(bdf, dev_dir, options);
     else
       dry_run(bdf, dev_dir, options);
 

@@ -32,13 +32,14 @@
 25_virtio_net_echo_loop.cpp  多包 echo loop，回收 RX/TX descriptor
 26_virtio_net_irq_echo_loop.cpp  使用 VFIO IRQ eventfd 驱动 echo loop
 27_virtio_net_ctrl_promisc.cpp  通过 control virtqueue 发送 RX_PROMISC 命令
+28_virtio_net_promisc_observe.cpp  设置 promisc 后保持运行并观察非本机 MAC 的 RX
 ```
 
 当前 `userspace_drivers/` 的代码组织：
 
 ```text
 11-20: 仍保持每个 sample 尽量自包含，方便逐步学习 VFIO / virtio PCI 机制
-21-27: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
+21-28: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
 
 vfio_utils.hpp       通用 VFIO / PCI config / region / capability helper
 virtio_net_vfio.hpp  virtio-net queue、vring、DMA、feature、notify、packet helper
@@ -84,8 +85,9 @@ virtio-net datapath，所以复用 helper 能降低维护成本，同时保留�
 - [33. Sample 25: Run a small virtio-net echo loop through VFIO](#33-sample-25-run-a-small-virtio-net-echo-loop-through-vfio)
 - [34. Sample 26: Drive the echo loop with VFIO IRQ eventfds](#34-sample-26-drive-the-echo-loop-with-vfio-irq-eventfds)
 - [35. Sample 27: Send virtio-net control command through VFIO](#35-sample-27-send-virtio-net-control-command-through-vfio)
-- [36. Refactor 结论：samples 21-27 的代码结构](#36-refactor-结论samples-21-27-的代码结构)
-- [37. 最小心智模型](#37-最小心智模型)
+- [36. Sample 28: Observe virtio-net promiscuous RX behavior](#36-sample-28-observe-virtio-net-promiscuous-rx-behavior)
+- [37. Refactor 结论：samples 21-28 的代码结构](#37-refactor-结论samples-21-28-的代码结构)
+- [38. 最小心智模型](#38-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2600,9 +2602,109 @@ DRIVER_OK 后 device_status 是否保持不带 NEEDS_RESET
 sample 27 的定位是演示 control virtqueue 的 request/ACK 模型。它仍然不实现完整的 MAC
 filter table、VLAN table、multiqueue 配置、offload 控制或长期运行的 control-plane。
 
-## 36. Refactor 结论：samples 21-27 的代码结构
+## 36. Sample 28: Observe virtio-net promiscuous RX behavior
 
-本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-27 这组已经进入
+文件：
+
+```text
+userspace_drivers/28_virtio_net_promisc_observe.cpp
+```
+
+sample 28 在 sample 27 的基础上继续往前走一步：control command ACK 成功后不马上
+reset，而是在 promisc 状态保持期间继续观察 RX queue。它的目标是验证 `RX_PROMISC=on/off`
+是否真的改变了 VF 的 RX 过滤行为。
+
+运行：
+
+```bash
+./28_virtio_net_promisc_observe_static 0000:c1:00.6
+./28_virtio_net_promisc_observe_static 0000:c1:00.6 --promisc on --wait-ms 60000 --yes
+./28_virtio_net_promisc_observe_static 0000:c1:00.6 --promisc off --wait-ms 10000 --yes
+```
+
+测试方式：
+
+```text
+1. 先启动 sample 28，promisc=on，等待 RX
+2. 从另一个 VF 发一帧 ethertype=0x88b5 的 raw Ethernet packet
+3. 目的 MAC 故意不要写 VF#3 的 MAC fe:bf:30:01:30:04
+4. 如果 backend/OVS 把该帧送到 VF#3 representor，promisc=on 时 sample 应该能看到它
+5. 再用 promisc=off 重复同样发送，通常不应该看到这类非本机 MAC 的 unicast
+```
+
+接收端：
+
+```bash
+./28_virtio_net_promisc_observe_static 0000:c1:00.6 --promisc on --wait-ms 60000 --stop-after 1 --yes
+```
+
+发送端可以用 repo 里的 raw frame 测试脚本。这里从 VF#0 `ens6f1v0` 发一帧目的 MAC
+不是 VF#3 MAC 的 `0x88b5` unknown-unicast frame：
+
+```bash
+python 22_test_raw.py \
+  --iface ens6f1v0 \
+  --src-mac fe:bf:30:01:30:01 \
+  --dst-mac 02:00:00:00:28:01 \
+  --ethertype 0x88b5 \
+  --payload-hex 70726f6d6973632d746573742d756e6b6e6f7766e2d647374000102030405060708090a0b0c0d0e0f \
+  --count 3 \
+  --interval 0.1
+```
+
+DPU 侧可以用 representor 确认 frame 确实被送到 VF#3：
+
+```bash
+tcpdump -eni en3f0pf0sf3003 'ether proto 0x88b5 or ether host 02:00:00:00:28:01'
+```
+
+对照测试：
+
+```bash
+./28_virtio_net_promisc_observe_static 0000:c1:00.6 --promisc off --wait-ms 10000 --stop-after 1 --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. 打开 VFIO container/group/device
+2. 打开 PCI Memory Space / Bus Master
+3. reset device
+4. 协商 FEATURES_OK，并接受 VIRTIO_NET_F_CTRL_VQ / VIRTIO_NET_F_CTRL_RX
+5. 配置 RX queue 0、TX queue 1、control queue 2
+6. 发布 RX buffers
+7. 发布 RX_PROMISC control descriptor chain
+8. enable RX/TX/control queues
+9. 写 DRIVER_OK
+10. notify RX queue
+11. notify control queue
+12. 等待 control ACK 0x00
+13. 在 promisc 状态保持期间继续 poll RX used.idx
+14. 对收到的 packet 打印 destination/source MAC、ethertype、是否匹配 VF MAC
+15. recycle RX descriptor，保持 RX queue 可以继续收包
+16. reset device，恢复 PCI command，unmap DMA
+```
+
+通过标准：
+
+```text
+control ACK byte: 0x00 (OK)
+Observed RX packet ...
+dst matches VF MAC: no
+this is the expected promisc-path observation
+```
+
+如果 promisc=on 也看不到非本机 MAC 的包，不一定是 sample 失败；可能是 DPU/OVS 没有把
+该 frame 送到 VF#3 的 backend port。先在 DPU representor 上用 tcpdump 确认该 frame
+是否经过 `en3f0pf0sf3003`，再判断 virtio-net RX filter。
+
+sample 28 仍然不是完整 sniffing driver：它只演示 control-plane 改 RX filter 后的
+observable datapath 行为，不处理 offload、multi-buffer packet、VLAN filter、MAC table
+或长期运行的 packet capture。
+
+## 37. Refactor 结论：samples 21-28 的代码结构
+
+本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-28 这组已经进入
 virtio-net datapath 的 sample 从“大量重复实现”收敛成“每个 sample 只展示新增概念”。
 
 完成后的分工：
@@ -2628,7 +2730,7 @@ virtio_net_vfio.hpp
     RX used entry / packet dump / echo reply helper
 ```
 
-21-27 现在的 sample 文件只保留：
+21-28 现在的 sample 文件只保留：
 
 ```text
 Options
@@ -2657,6 +2759,9 @@ main() 参数解析
 
 27  补上 control virtqueue，发送 RX_PROMISC control command；
     展示 control header / command data / ACK byte 这类 descriptor chain。
+
+28  在 RX_PROMISC command ACK 后保持 device running；
+    观察非 VF MAC 目的地址的 packet 是否进入 RX used ring。
 ```
 
 为什么 `virtio_net_vfio.hpp` 里的函数是 `inline`：
@@ -2682,7 +2787,7 @@ libvirtio_net_vfio    CMake static library
 重复代码虽然多，但有助于每个 sample 单独说明“这一步新增了什么”。等这部分稳定后，可以
 再考虑只抽出最底层的安全/RAII helper，而不要把状态机和 queue 操作过早隐藏起来。
 
-## 37. 最小心智模型
+## 38. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
