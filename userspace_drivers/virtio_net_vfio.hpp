@@ -55,11 +55,13 @@ constexpr unsigned VIRTIO_NET_F_CTRL_MAC_ADDR = 23;
 constexpr std::uint8_t kVirtioNetCtrlRx = 0;
 constexpr std::uint8_t kVirtioNetCtrlRxPromisc = 0;
 constexpr std::uint8_t kVirtioNetCtrlMac = 1;
+constexpr std::uint8_t kVirtioNetCtrlMacTableSet = 0;
 constexpr std::uint8_t kVirtioNetCtrlMacAddrSet = 1;
 constexpr std::uint8_t kVirtioNetOk = 0;
 constexpr std::uint8_t kVirtioNetErr = 1;
 constexpr std::size_t kVirtioNetCtrlHdrSize = 2;
 constexpr std::size_t kVirtioNetCtrlStateSize = 1;
+constexpr std::size_t kVirtioNetCtrlMacTableCountSize = 4;
 constexpr std::size_t kVirtioNetCtrlMacAddrSize = 6;
 constexpr std::size_t kVirtioNetCtrlAckSize = 1;
 constexpr std::uint8_t kVirtioNetCtrlAckInitial = 0xff;
@@ -1390,6 +1392,93 @@ inline void publish_mac_addr_control_command(
 
   std::uint16_t *avail_ring = vring_avail_ring(ctrl_queue_base,
                                                layout.ctrl_vring);
+  avail_ring[0] = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  *vring_avail_idx(ctrl_queue_base, layout.ctrl_vring) = 1;
+  std::atomic_thread_fence(std::memory_order_release);
+}
+
+inline std::size_t mac_table_control_data_size(std::size_t unicast_macs,
+                                               std::size_t multicast_macs) {
+  std::size_t unicast_bytes =
+      checked_add(kVirtioNetCtrlMacTableCountSize,
+                  checked_mul(unicast_macs, kVirtioNetCtrlMacAddrSize,
+                              "unicast MAC table"),
+                  "unicast MAC table");
+  std::size_t multicast_bytes =
+      checked_add(kVirtioNetCtrlMacTableCountSize,
+                  checked_mul(multicast_macs, kVirtioNetCtrlMacAddrSize,
+                              "multicast MAC table"),
+                  "multicast MAC table");
+  return checked_add(unicast_bytes, multicast_bytes,
+                     "MAC table control data");
+}
+
+inline void write_le32_to_bytes(std::uint8_t *bytes, std::uint32_t value) {
+  bytes[0] = static_cast<std::uint8_t>(value & 0xffu);
+  bytes[1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
+  bytes[2] = static_cast<std::uint8_t>((value >> 16) & 0xffu);
+  bytes[3] = static_cast<std::uint8_t>((value >> 24) & 0xffu);
+}
+
+inline void publish_mac_table_control_command(
+    std::uint8_t *ctrl_queue_base, std::uint8_t *dma_base,
+    const CtrlqDmaLayout &layout, std::uint64_t base_iova,
+    const std::array<std::uint8_t, 6> &unicast_mac) {
+  if (layout.ctrl_vring.queue_size < 4) {
+    throw std::runtime_error(
+        "control queue-size must be at least 4 for MAC_TABLE_SET");
+  }
+
+  constexpr std::size_t unicast_count = 1;
+  constexpr std::size_t multicast_count = 0;
+  constexpr std::size_t unicast_table_size =
+      kVirtioNetCtrlMacTableCountSize +
+      unicast_count * kVirtioNetCtrlMacAddrSize;
+  constexpr std::size_t multicast_table_size =
+      kVirtioNetCtrlMacTableCountSize +
+      multicast_count * kVirtioNetCtrlMacAddrSize;
+  constexpr std::size_t required_data_size =
+      unicast_table_size + multicast_table_size;
+
+  if (layout.ctrl_data_size < required_data_size) {
+    throw std::runtime_error(
+        "control command data area is too small for MAC_TABLE_SET");
+  }
+
+  std::uint8_t *header = dma_base + layout.ctrl_hdr_offset;
+  std::uint8_t *unicast_table = dma_base + layout.ctrl_data_offset;
+  std::uint8_t *multicast_table = unicast_table + unicast_table_size;
+  std::uint8_t *ack = dma_base + layout.ctrl_ack_offset;
+
+  header[0] = kVirtioNetCtrlMac;
+  header[1] = kVirtioNetCtrlMacTableSet;
+  write_le32_to_bytes(unicast_table, unicast_count);
+  std::copy(unicast_mac.begin(), unicast_mac.end(),
+            unicast_table + kVirtioNetCtrlMacTableCountSize);
+  write_le32_to_bytes(multicast_table, multicast_count);
+  ack[0] = kVirtioNetCtrlAckInitial;
+
+  VringDesc *desc = vring_descs(ctrl_queue_base, layout.ctrl_vring);
+  desc[0].addr = base_iova + layout.ctrl_hdr_offset;
+  desc[0].len = kVirtioNetCtrlHdrSize;
+  desc[0].flags = kVringDescFNext;
+  desc[0].next = 1;
+  desc[1].addr = base_iova + layout.ctrl_data_offset;
+  desc[1].len = unicast_table_size;
+  desc[1].flags = kVringDescFNext;
+  desc[1].next = 2;
+  desc[2].addr = base_iova + layout.ctrl_data_offset + unicast_table_size;
+  desc[2].len = multicast_table_size;
+  desc[2].flags = kVringDescFNext;
+  desc[2].next = 3;
+  desc[3].addr = base_iova + layout.ctrl_ack_offset;
+  desc[3].len = kVirtioNetCtrlAckSize;
+  desc[3].flags = kVringDescFWrite;
+  desc[3].next = 0;
+
+  std::uint16_t *avail_ring =
+      vring_avail_ring(ctrl_queue_base, layout.ctrl_vring);
   avail_ring[0] = 0;
   std::atomic_thread_fence(std::memory_order_release);
   *vring_avail_idx(ctrl_queue_base, layout.ctrl_vring) = 1;
