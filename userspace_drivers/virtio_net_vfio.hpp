@@ -41,12 +41,15 @@ constexpr std::size_t kVirtioNetHeaderSize = 12;
 constexpr std::uint16_t kDefaultEthertype = 0x88b5;
 constexpr std::size_t kEthernetHeaderSize = 14;
 constexpr std::size_t kEthernetMinFrameSize = 60;
+constexpr std::uint16_t kVringDescFNext = 1;
 constexpr std::uint16_t kVringDescFWrite = 2;
 
 // linux/virtio_net.h contains a C field named "class", so these samples keep
 // the few virtio-net feature bit numbers and config offsets they need here.
 constexpr unsigned VIRTIO_NET_F_MAC = 5;
 constexpr unsigned VIRTIO_NET_F_STATUS = 16;
+constexpr unsigned VIRTIO_NET_F_CTRL_VQ = 17;
+constexpr unsigned VIRTIO_NET_F_CTRL_RX = 18;
 constexpr std::size_t kVirtioNetConfigMac = 0;
 constexpr std::size_t kVirtioNetConfigStatus = 6;
 constexpr std::size_t kVirtioNetConfigMaxVirtqueuePairs = 8;

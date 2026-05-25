@@ -31,13 +31,14 @@
 24_virtio_net_rx_tx_echo.cpp  收到一帧后构造 reply，并通过 TX queue 回发
 25_virtio_net_echo_loop.cpp  多包 echo loop，回收 RX/TX descriptor
 26_virtio_net_irq_echo_loop.cpp  使用 VFIO IRQ eventfd 驱动 echo loop
+27_virtio_net_ctrl_promisc.cpp  通过 control virtqueue 发送 RX_PROMISC 命令
 ```
 
 当前 `userspace_drivers/` 的代码组织：
 
 ```text
 11-20: 仍保持每个 sample 尽量自包含，方便逐步学习 VFIO / virtio PCI 机制
-21-26: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
+21-27: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
 
 vfio_utils.hpp       通用 VFIO / PCI config / region / capability helper
 virtio_net_vfio.hpp  virtio-net queue、vring、DMA、feature、notify、packet helper
@@ -82,8 +83,9 @@ virtio-net datapath，所以复用 helper 能降低维护成本，同时保留�
 - [32. Sample 24: Echo one virtio-net RX packet through VFIO](#32-sample-24-echo-one-virtio-net-rx-packet-through-vfio)
 - [33. Sample 25: Run a small virtio-net echo loop through VFIO](#33-sample-25-run-a-small-virtio-net-echo-loop-through-vfio)
 - [34. Sample 26: Drive the echo loop with VFIO IRQ eventfds](#34-sample-26-drive-the-echo-loop-with-vfio-irq-eventfds)
-- [35. Refactor 结论：samples 21-26 的代码结构](#35-refactor-结论samples-21-26-的代码结构)
-- [36. 最小心智模型](#36-最小心智模型)
+- [35. Sample 27: Send virtio-net control command through VFIO](#35-sample-27-send-virtio-net-control-command-through-vfio)
+- [36. Refactor 结论：samples 21-27 的代码结构](#36-refactor-结论samples-21-27-的代码结构)
+- [37. 最小心智模型](#37-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2523,9 +2525,84 @@ sample 26 的定位是把 sample 25 从“主动 polling”推进到“interrupt
 它仍然不处理 chained descriptors、checksum/offload metadata、control virtqueue、
 多队列调度或协议栈。
 
-## 35. Refactor 结论：samples 21-26 的代码结构
+## 35. Sample 27: Send virtio-net control command through VFIO
 
-本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-26 这组已经进入
+文件：
+
+```text
+userspace_drivers/27_virtio_net_ctrl_promisc.cpp
+```
+
+sample 27 补上 virtio-net 的第三个 queue：control virtqueue。前面的 sample 已经使用
+RX queue 0 和 TX queue 1；这个设备 `num_queues=3`，是因为它还提供
+`VIRTIO_NET_F_CTRL_VQ`，默认 queue 2 就是 control queue。
+
+本 sample 默认发送：
+
+```text
+class = VIRTIO_NET_CTRL_RX
+cmd   = VIRTIO_NET_CTRL_RX_PROMISC
+data  = 1
+```
+
+也就是临时打开 promiscuous mode。退出前会 reset device，所以这个模式不会被 sample
+长期留在设备上。
+
+运行：
+
+```bash
+./27_virtio_net_ctrl_promisc_static 0000:c1:00.6
+./27_virtio_net_ctrl_promisc_static 0000:c1:00.6 --promisc on --yes
+./27_virtio_net_ctrl_promisc_static 0000:c1:00.6 --queue-size 128 --promisc off --yes
+```
+
+`--yes` 做的事情：
+
+```text
+1. 打开 VFIO container/group/device
+2. 打开 PCI Memory Space / Bus Master
+3. reset device
+4. 协商 FEATURES_OK，并额外接受 VIRTIO_NET_F_CTRL_VQ / VIRTIO_NET_F_CTRL_RX
+5. 配置 RX queue 0、TX queue 1、control queue 2
+6. 发布 RX buffers，避免 queue pair 处于明显不完整状态
+7. 在 control queue 中发布 3 个 descriptor 组成的 chain：
+   readable control header -> readable state byte -> writable ACK byte
+8. enable RX/TX/control queues
+9. 写 DRIVER_OK
+10. notify RX queue
+11. notify control queue
+12. 等待 control used.idx 前进，读取 ACK byte
+13. reset device
+14. 恢复 PCI command register
+15. VFIO_IOMMU_UNMAP_DMA
+```
+
+control virtqueue 的 descriptor chain 很像真实 driver 里常见的 scatter-gather request：
+
+```text
+desc 0: device-readable struct virtio_net_ctrl_hdr
+desc 1: device-readable command data, 这里是 1 byte on/off state
+desc 2: device-writable ACK byte
+```
+
+如果 ACK 是 `0x00`，表示 `VIRTIO_NET_OK`；如果是 `0x01`，表示 `VIRTIO_NET_ERR`。
+如果 control used ring 没有前进，说明 device 没有消费这个 control command，需要检查：
+
+```text
+是否协商了 VIRTIO_NET_F_CTRL_VQ
+是否协商了 VIRTIO_NET_F_CTRL_RX
+control queue index 是否正确，当前设备默认是 2
+control queue 是否 enable
+notify offset/value 是否正确
+DRIVER_OK 后 device_status 是否保持不带 NEEDS_RESET
+```
+
+sample 27 的定位是演示 control virtqueue 的 request/ACK 模型。它仍然不实现完整的 MAC
+filter table、VLAN table、multiqueue 配置、offload 控制或长期运行的 control-plane。
+
+## 36. Refactor 结论：samples 21-27 的代码结构
+
+本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-27 这组已经进入
 virtio-net datapath 的 sample 从“大量重复实现”收敛成“每个 sample 只展示新增概念”。
 
 完成后的分工：
@@ -2551,7 +2628,7 @@ virtio_net_vfio.hpp
     RX used entry / packet dump / echo reply helper
 ```
 
-21-26 现在的 sample 文件只保留：
+21-27 现在的 sample 文件只保留：
 
 ```text
 Options
@@ -2577,6 +2654,9 @@ main() 参数解析
 
 26  在 25 基础上把 wait primitive 换成 VFIO IRQ eventfd；
     eventfd 唤醒后仍然以 used ring 作为真实完成来源。
+
+27  补上 control virtqueue，发送 RX_PROMISC control command；
+    展示 control header / command data / ACK byte 这类 descriptor chain。
 ```
 
 为什么 `virtio_net_vfio.hpp` 里的函数是 `inline`：
@@ -2602,7 +2682,7 @@ libvirtio_net_vfio    CMake static library
 重复代码虽然多，但有助于每个 sample 单独说明“这一步新增了什么”。等这部分稳定后，可以
 再考虑只抽出最底层的安全/RAII helper，而不要把状态机和 queue 操作过早隐藏起来。
 
-## 36. 最小心智模型
+## 37. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
