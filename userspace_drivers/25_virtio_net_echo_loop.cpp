@@ -35,20 +35,15 @@
 // - Reusing a small pool of TX descriptors after TX completions
 // - Running a bounded userspace datapath loop
 
-#include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <chrono>
-#include <cerrno>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <fcntl.h>
+#include <filesystem>
 #include <format>
 #include <iostream>
-#include <limits>
 #include <linux/pci_regs.h>
 #include <linux/vfio.h>
 #include <linux/virtio_config.h>
@@ -87,37 +82,38 @@ struct Options {
 };
 
 static void usage(const char *argv0) {
-  std::println(std::cerr,
-               "Usage:\n"
-               "  {} <BDF> [--rx-queue <n>] [--tx-queue <n>]\n"
-               "       [--queue-size <n>] [--rx-buffers <n>] [--tx-buffers <n>]\n"
-               "       [--rx-buffer-size <bytes>] [--iova <addr>]\n"
-               "       [--align <bytes>] [--run-ms <n>] [--max-packets <n>]\n"
-               "       [--src-mac <mac>]\n"
-               "       [--match-ethertype <hex>|--accept-any-ethertype]\n"
-               "       [--dump-bytes <n>] [--dump-every-packet]\n"
-               "       [--dry-run|--yes]\n\n"
-               "Defaults:\n"
-               "  rx-queue = 0\n"
-               "  tx-queue = 1\n"
-               "  queue-size = each target queue's device-reported size\n"
-               "  rx-buffers = 64\n"
-               "  tx-buffers = 8\n"
-               "  rx-buffer-size = 2048\n"
-               "  iova = 0x100000000\n"
-               "  align = 4096\n"
-               "  run-ms = 30000\n"
-               "  max-packets = 3\n"
-               "  src-mac = virtio-net config MAC\n"
-               "  match-ethertype = 0x88b5\n"
-               "  dump-bytes = 160\n"
-               "  dump-every-packet = false\n"
-               "  default mode = dry-run\n\n"
-               "Examples:\n"
-               "  {} c1:00.6\n"
-               "  {} c1:00.6 --run-ms 60000 --max-packets 3 --yes\n"
-               "  {} c1:00.6 --match-ethertype 0x88b5 --dump-bytes 192 --yes",
-               argv0, argv0, argv0, argv0);
+  std::println(
+      std::cerr,
+      "Usage:\n"
+      "  {} <BDF> [--rx-queue <n>] [--tx-queue <n>]\n"
+      "       [--queue-size <n>] [--rx-buffers <n>] [--tx-buffers <n>]\n"
+      "       [--rx-buffer-size <bytes>] [--iova <addr>]\n"
+      "       [--align <bytes>] [--run-ms <n>] [--max-packets <n>]\n"
+      "       [--src-mac <mac>]\n"
+      "       [--match-ethertype <hex>|--accept-any-ethertype]\n"
+      "       [--dump-bytes <n>] [--dump-every-packet]\n"
+      "       [--dry-run|--yes]\n\n"
+      "Defaults:\n"
+      "  rx-queue = 0\n"
+      "  tx-queue = 1\n"
+      "  queue-size = each target queue's device-reported size\n"
+      "  rx-buffers = 64\n"
+      "  tx-buffers = 8\n"
+      "  rx-buffer-size = 2048\n"
+      "  iova = 0x100000000\n"
+      "  align = 4096\n"
+      "  run-ms = 30000\n"
+      "  max-packets = 3\n"
+      "  src-mac = virtio-net config MAC\n"
+      "  match-ethertype = 0x88b5\n"
+      "  dump-bytes = 160\n"
+      "  dump-every-packet = false\n"
+      "  default mode = dry-run\n\n"
+      "Examples:\n"
+      "  {} c1:00.6\n"
+      "  {} c1:00.6 --run-ms 60000 --max-packets 3 --yes\n"
+      "  {} c1:00.6 --match-ethertype 0x88b5 --dump-bytes 192 --yes",
+      argv0, argv0, argv0, argv0);
 }
 
 struct TxSlot {
@@ -134,11 +130,11 @@ static void consume_tx_completions(std::uint8_t *tx_queue_base,
   if (count == 0)
     return;
 
-  const volatile VringUsedElem *elems = vring_used_elems(tx_queue_base, tx_layout);
+  const volatile VringUsedElem *elems =
+      vring_used_elems(tx_queue_base, tx_layout);
   for (std::uint16_t i = 0; i < count; ++i) {
-    std::uint16_t slot =
-        static_cast<std::uint16_t>((last_tx_used_idx + i) %
-                                   tx_layout.queue_size);
+    std::uint16_t slot = static_cast<std::uint16_t>((last_tx_used_idx + i) %
+                                                    tx_layout.queue_size);
     std::uint32_t id = static_cast<std::uint32_t>(elems[slot].id);
     std::uint32_t len = static_cast<std::uint32_t>(elems[slot].len);
     if (id >= tx_slots.size()) {
@@ -183,9 +179,9 @@ static void dry_run(const std::string &bdf, const fs::path &dev_dir,
                options.rx_buffer_size);
   std::println("run-ms: {}", options.run_ms);
   std::println("max-packets: {}", options.max_packets);
-  std::println("reply src-mac: {}",
-               options.src_mac ? mac_string(*options.src_mac)
-                               : "virtio-net config MAC");
+  std::println("reply src-mac: {}", options.src_mac
+                                        ? mac_string(*options.src_mac)
+                                        : "virtio-net config MAC");
   std::println("match ethertype: {}",
                options.match_ethertype
                    ? std::format("0x{:04x}", *options.match_ethertype)
@@ -195,15 +191,12 @@ static void dry_run(const std::string &bdf, const fs::path &dev_dir,
                options.dump_every_packet ? "yes" : "no");
 
   if (options.queue_size) {
-    DmaLayout layout = compute_dma_layout(*options.queue_size,
-                                          *options.queue_size, options.align,
-                                          options.rx_buffers,
-                                          options.tx_buffers,
-                                          options.rx_buffer_size,
-                                          options.rx_buffer_size);
+    DmaLayout layout = compute_dma_layout(
+        *options.queue_size, *options.queue_size, options.align,
+        options.rx_buffers, options.tx_buffers, options.rx_buffer_size,
+        options.rx_buffer_size);
     print_dma_layout(layout, options.iova, options.rx_buffers,
-                     options.tx_buffers,
-                     options.rx_buffer_size);
+                     options.tx_buffers, options.rx_buffer_size);
   } else {
     std::println("queue_size: each target queue's device-reported size");
   }
@@ -251,9 +244,9 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
                options.rx_buffer_size);
   std::println("run-ms: {}", options.run_ms);
   std::println("max-packets: {}", options.max_packets);
-  std::println("reply src-mac: {}",
-               options.src_mac ? mac_string(*options.src_mac)
-                               : "virtio-net config MAC");
+  std::println("reply src-mac: {}", options.src_mac
+                                        ? mac_string(*options.src_mac)
+                                        : "virtio-net config MAC");
   std::println("match ethertype: {}",
                options.match_ethertype
                    ? std::format("0x{:04x}", *options.match_ethertype)
@@ -287,8 +280,7 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
   std::println("  bar: {}", notify.bar);
   std::println("  offset: 0x{:x}", notify.offset);
   std::println("  length: 0x{:x} ({})", notify.length, notify.length);
-  std::println("  notify_off_multiplier: {}",
-               notify.notify_off_multiplier);
+  std::println("  notify_off_multiplier: {}", notify.notify_off_multiplier);
 
   std::size_t mapping_delta = 0;
   MappedRegion common_mapping =
@@ -363,13 +355,10 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
   std::println("  ethertype/payload: copied from received frame");
   std::println("  TX buffer bytes: {}", tx_buffer_size);
 
-  DmaLayout layout = compute_dma_layout(rx_queue_size, tx_queue_size,
-                                        options.align, options.rx_buffers,
-                                        options.tx_buffers,
-                                        options.rx_buffer_size,
-                                        tx_buffer_size);
-  print_dma_layout(layout, options.iova, options.rx_buffers,
-                   options.tx_buffers,
+  DmaLayout layout = compute_dma_layout(
+      rx_queue_size, tx_queue_size, options.align, options.rx_buffers,
+      options.tx_buffers, options.rx_buffer_size, tx_buffer_size);
+  print_dma_layout(layout, options.iova, options.rx_buffers, options.tx_buffers,
                    options.rx_buffer_size);
 
   AnonymousBuffer buffer(layout.total_size);
@@ -396,9 +385,8 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
   publish_rx_buffers(rx_queue_base, layout.rx_vring, rx_buffer_iova,
                      options.rx_buffers, options.rx_buffer_size);
   std::println("Published {} writable RX descriptors", options.rx_buffers);
-  std::println("RX avail.idx: {}",
-               static_cast<std::uint16_t>(
-                   *vring_avail_idx(rx_queue_base, layout.rx_vring)));
+  std::println("RX avail.idx: {}", static_cast<std::uint16_t>(*vring_avail_idx(
+                                       rx_queue_base, layout.rx_vring)));
   std::println("Initial RX used.idx: {}",
                read_used_idx(rx_queue_base, layout.rx_vring));
 
@@ -458,8 +446,10 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
                tx_notify_value);
 
   std::vector<TxSlot> tx_slots(options.tx_buffers);
-  std::uint16_t last_rx_used_idx = read_used_idx(rx_queue_base, layout.rx_vring);
-  std::uint16_t last_tx_used_idx = read_used_idx(tx_queue_base, layout.tx_vring);
+  std::uint16_t last_rx_used_idx =
+      read_used_idx(rx_queue_base, layout.rx_vring);
+  std::uint16_t last_tx_used_idx =
+      read_used_idx(tx_queue_base, layout.tx_vring);
   std::uint32_t received_rx = 0;
   std::uint32_t echoed_tx = 0;
   std::uint32_t completed_tx = 0;
@@ -474,8 +464,8 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
   std::println("Running echo loop for up to {} ms or {} packets",
                options.run_ms, options.max_packets);
 
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(options.run_ms);
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(options.run_ms);
   while (echoed_tx < options.max_packets &&
          (options.run_ms == 0 || std::chrono::steady_clock::now() < deadline)) {
     consume_tx_completions(tx_queue_base, layout.tx_vring, last_tx_used_idx,
@@ -487,9 +477,8 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
     bool made_progress = false;
 
     for (std::uint16_t i = 0; i < rx_count; ++i) {
-      std::uint16_t used_slot =
-          static_cast<std::uint16_t>((last_rx_used_idx + i) %
-                                     layout.rx_vring.queue_size);
+      std::uint16_t used_slot = static_cast<std::uint16_t>(
+          (last_rx_used_idx + i) % layout.rx_vring.queue_size);
       std::optional<ReceivedPacket> received = read_rx_used_packet(
           buffer.data(), rx_queue_base, layout, used_slot, options.rx_buffers,
           options.rx_buffer_size, options.match_ethertype);
@@ -511,8 +500,8 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
       ++received_rx;
       std::optional<std::uint16_t> tx_slot = find_free_tx_slot(tx_slots);
       while (!tx_slot && std::chrono::steady_clock::now() < deadline) {
-        consume_tx_completions(tx_queue_base, layout.tx_vring,
-                               last_tx_used_idx, tx_slots, completed_tx);
+        consume_tx_completions(tx_queue_base, layout.tx_vring, last_tx_used_idx,
+                               tx_slots, completed_tx);
         tx_slot = find_free_tx_slot(tx_slots);
         if (!tx_slot)
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -527,8 +516,7 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
         break;
       }
 
-      const std::uint8_t *rx_ethernet =
-          received->buffer + kVirtioNetHeaderSize;
+      const std::uint8_t *rx_ethernet = received->buffer + kVirtioNetHeaderSize;
       std::array<std::uint8_t, 6> reply_dst_mac =
           mac_from_bytes(rx_ethernet + 6);
       std::uint8_t *tx_packet =
@@ -537,10 +525,9 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
       std::uint64_t tx_packet_iova =
           tx_buffers_iova +
           static_cast<std::uint64_t>(*tx_slot) * layout.tx_buffer_size;
-      std::size_t tx_used_len =
-          build_tx_reply_from_rx(tx_packet, layout.tx_buffer_size,
-                                 received->buffer, received->used_len,
-                                 reply_src_mac);
+      std::size_t tx_used_len = build_tx_reply_from_rx(
+          tx_packet, layout.tx_buffer_size, received->buffer,
+          received->used_len, reply_src_mac);
 
       publish_tx_packet(tx_queue_base, layout.tx_vring, *tx_slot,
                         tx_packet_iova, tx_used_len);
@@ -557,8 +544,9 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
       std::println("  TX bytes: {}", tx_used_len);
       if ((echoed_tx == 1 || options.dump_every_packet) &&
           options.dump_bytes > 0) {
-        std::println("{} RX buffer dump:",
-                     options.dump_every_packet ? "Echoed packet" : "First echoed");
+        std::println("{} RX buffer dump:", options.dump_every_packet
+                                               ? "Echoed packet"
+                                               : "First echoed");
         print_virtio_net_rx_buffer(received->buffer, received->used_len,
                                    options.dump_bytes);
         std::println("{} TX reply packet prefix:",
@@ -580,8 +568,8 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  auto tx_deadline = std::chrono::steady_clock::now() +
-                     std::chrono::milliseconds(1000);
+  auto tx_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
   while (completed_tx < echoed_tx &&
          std::chrono::steady_clock::now() < tx_deadline) {
     consume_tx_completions(tx_queue_base, layout.tx_vring, last_tx_used_idx,
@@ -603,7 +591,8 @@ static void run_echo_loop(const std::string &bdf, const fs::path &dev_dir,
   std::println("  TX avail.idx: {}",
                static_cast<std::uint16_t>(
                    *vring_avail_idx(tx_queue_base, layout.tx_vring)));
-  std::println("  TX used.idx: {}", read_used_idx(tx_queue_base, layout.tx_vring));
+  std::println("  TX used.idx: {}",
+               read_used_idx(tx_queue_base, layout.tx_vring));
   print_status("after loop", read_status(common_mapping, mapping_delta));
 
   selection.restore();
@@ -678,7 +667,8 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    if (!is_power_of_two(options.align) || options.align < kVringUsedAlignSize) {
+    if (!is_power_of_two(options.align) ||
+        options.align < kVringUsedAlignSize) {
       throw std::runtime_error(
           "align must be a power of two and at least 4 bytes");
     }

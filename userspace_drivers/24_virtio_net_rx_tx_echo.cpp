@@ -35,20 +35,15 @@
 // - Publishing a device-readable TX descriptor after DRIVER_OK
 // - Notifying TX and waiting for TX used-ring completion
 
-#include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <chrono>
-#include <cerrno>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <fcntl.h>
+#include <filesystem>
 #include <format>
 #include <iostream>
-#include <limits>
 #include <linux/pci_regs.h>
 #include <linux/vfio.h>
 #include <linux/virtio_config.h>
@@ -128,9 +123,9 @@ static void dry_run(const std::string &bdf, const fs::path &dev_dir,
   std::println("RX buffers: {} x {} bytes", options.rx_buffers,
                options.rx_buffer_size);
   std::println("wait-ms: {}", options.wait_ms);
-  std::println("reply src-mac: {}",
-               options.src_mac ? mac_string(*options.src_mac)
-                               : "virtio-net config MAC");
+  std::println("reply src-mac: {}", options.src_mac
+                                        ? mac_string(*options.src_mac)
+                                        : "virtio-net config MAC");
   std::println("match ethertype: {}",
                options.match_ethertype
                    ? std::format("0x{:04x}", *options.match_ethertype)
@@ -138,11 +133,9 @@ static void dry_run(const std::string &bdf, const fs::path &dev_dir,
   std::println("dump-bytes: {}", options.dump_bytes);
 
   if (options.queue_size) {
-    DmaLayout layout = compute_dma_layout(*options.queue_size,
-                                          *options.queue_size, options.align,
-                                          options.rx_buffers,
-                                          options.rx_buffer_size,
-                                          options.rx_buffer_size);
+    DmaLayout layout = compute_dma_layout(
+        *options.queue_size, *options.queue_size, options.align,
+        options.rx_buffers, options.rx_buffer_size, options.rx_buffer_size);
     print_dma_layout(layout, options.iova, options.rx_buffers,
                      options.rx_buffer_size);
   } else {
@@ -168,7 +161,8 @@ static void dry_run(const std::string &bdf, const fs::path &dev_dir,
   std::println("Would write DRIVER_OK, notify RX, then wait up to {} ms for "
                "a matching RX packet",
                options.wait_ms);
-  std::println("Would build a TX reply by swapping Ethernet source/destination");
+  std::println(
+      "Would build a TX reply by swapping Ethernet source/destination");
   std::println("Would publish one TX descriptor, notify TX, and poll TX "
                "used.idx for completion");
   std::println("Would restore queue_select, reset the device, then unmap DMA");
@@ -190,9 +184,9 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
   std::println("RX buffers: {} x {} bytes", options.rx_buffers,
                options.rx_buffer_size);
   std::println("wait-ms: {}", options.wait_ms);
-  std::println("reply src-mac: {}",
-               options.src_mac ? mac_string(*options.src_mac)
-                               : "virtio-net config MAC");
+  std::println("reply src-mac: {}", options.src_mac
+                                        ? mac_string(*options.src_mac)
+                                        : "virtio-net config MAC");
   std::println("match ethertype: {}",
                options.match_ethertype
                    ? std::format("0x{:04x}", *options.match_ethertype)
@@ -224,8 +218,7 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
   std::println("  bar: {}", notify.bar);
   std::println("  offset: 0x{:x}", notify.offset);
   std::println("  length: 0x{:x} ({})", notify.length, notify.length);
-  std::println("  notify_off_multiplier: {}",
-               notify.notify_off_multiplier);
+  std::println("  notify_off_multiplier: {}", notify.notify_off_multiplier);
 
   std::size_t mapping_delta = 0;
   MappedRegion common_mapping =
@@ -302,8 +295,7 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
 
   DmaLayout layout = compute_dma_layout(rx_queue_size, tx_queue_size,
                                         options.align, options.rx_buffers,
-                                        options.rx_buffer_size,
-                                        tx_buffer_size);
+                                        options.rx_buffer_size, tx_buffer_size);
   print_dma_layout(layout, options.iova, options.rx_buffers,
                    options.rx_buffer_size);
 
@@ -332,9 +324,8 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
   publish_rx_buffers(rx_queue_base, layout.rx_vring, rx_buffer_iova,
                      options.rx_buffers, options.rx_buffer_size);
   std::println("Published {} writable RX descriptors", options.rx_buffers);
-  std::println("RX avail.idx: {}",
-               static_cast<std::uint16_t>(
-                   *vring_avail_idx(rx_queue_base, layout.rx_vring)));
+  std::println("RX avail.idx: {}", static_cast<std::uint16_t>(*vring_avail_idx(
+                                       rx_queue_base, layout.rx_vring)));
   std::println("Initial RX used.idx: {}",
                read_used_idx(rx_queue_base, layout.rx_vring));
 
@@ -393,15 +384,15 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
                "VIRTIO_F_NOTIFICATION_DATA was not negotiated)",
                tx_notify_value);
 
-  std::uint16_t rx_used_base_idx = read_used_idx(rx_queue_base, layout.rx_vring);
+  std::uint16_t rx_used_base_idx =
+      read_used_idx(rx_queue_base, layout.rx_vring);
   std::atomic_thread_fence(std::memory_order_release);
   set_driver_ok(common_mapping, mapping_delta);
   print_status("after DRIVER_OK", read_status(common_mapping, mapping_delta));
 
   write_notify(rx_notify_mapping, rx_notify_delta, rx_notify_value);
   std::println("Wrote one 16-bit RX notify value");
-  std::println("Waiting up to {} ms for a matching RX packet",
-               options.wait_ms);
+  std::println("Waiting up to {} ms for a matching RX packet", options.wait_ms);
 
   std::optional<ReceivedPacket> received = wait_for_matching_rx_packet(
       buffer.data(), rx_queue_base, layout, rx_used_base_idx,
@@ -423,10 +414,8 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
     throw std::runtime_error("no RX packet matched ethertype " + match_text);
   }
 
-  const std::uint8_t *rx_ethernet =
-      received->buffer + kVirtioNetHeaderSize;
-  std::array<std::uint8_t, 6> reply_dst_mac =
-      mac_from_bytes(rx_ethernet + 6);
+  const std::uint8_t *rx_ethernet = received->buffer + kVirtioNetHeaderSize;
+  std::array<std::uint8_t, 6> reply_dst_mac = mac_from_bytes(rx_ethernet + 6);
   std::println("Selected RX packet for reply:");
   std::println("  used slot: {}", received->used_slot);
   std::println("  descriptor id: {}", received->desc_id);
@@ -438,17 +427,16 @@ static void run_rx_tx_echo(const std::string &bdf, const fs::path &dev_dir,
   print_virtio_net_rx_buffer(received->buffer, received->used_len,
                              options.dump_bytes);
 
-  std::uint16_t tx_used_base_idx = read_used_idx(tx_queue_base, layout.tx_vring);
+  std::uint16_t tx_used_base_idx =
+      read_used_idx(tx_queue_base, layout.tx_vring);
   std::size_t tx_used_len =
-      build_tx_reply_from_rx(tx_packet, layout.tx_packet_size,
-                             received->buffer, received->used_len,
-                             reply_src_mac);
+      build_tx_reply_from_rx(tx_packet, layout.tx_packet_size, received->buffer,
+                             received->used_len, reply_src_mac);
   publish_tx_packet(tx_queue_base, layout.tx_vring, tx_packet_iova,
                     tx_used_len);
   std::println("Published one TX reply descriptor");
-  std::println("TX avail.idx: {}",
-               static_cast<std::uint16_t>(
-                   *vring_avail_idx(tx_queue_base, layout.tx_vring)));
+  std::println("TX avail.idx: {}", static_cast<std::uint16_t>(*vring_avail_idx(
+                                       tx_queue_base, layout.tx_vring)));
   std::println("TX reply packet bytes: {}", tx_used_len);
   std::println("TX reply packet prefix:");
   print_hex_dump(tx_packet, tx_used_len, options.dump_bytes);
@@ -541,7 +529,8 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    if (!is_power_of_two(options.align) || options.align < kVringUsedAlignSize) {
+    if (!is_power_of_two(options.align) ||
+        options.align < kVringUsedAlignSize) {
       throw std::runtime_error(
           "align must be a power of two and at least 4 bytes");
     }
