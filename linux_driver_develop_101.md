@@ -30,13 +30,14 @@
 23_virtio_net_tx_packet.cpp  发布 TX descriptor，发送一帧并观察 TX completion
 24_virtio_net_rx_tx_echo.cpp  收到一帧后构造 reply，并通过 TX queue 回发
 25_virtio_net_echo_loop.cpp  多包 echo loop，回收 RX/TX descriptor
+26_virtio_net_irq_echo_loop.cpp  使用 VFIO IRQ eventfd 驱动 echo loop
 ```
 
 当前 `userspace_drivers/` 的代码组织：
 
 ```text
 11-20: 仍保持每个 sample 尽量自包含，方便逐步学习 VFIO / virtio PCI 机制
-21-25: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
+21-26: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
 
 vfio_utils.hpp       通用 VFIO / PCI config / region / capability helper
 virtio_net_vfio.hpp  virtio-net queue、vring、DMA、feature、notify、packet helper
@@ -80,8 +81,9 @@ virtio-net datapath，所以复用 helper 能降低维护成本，同时保留�
 - [31. Sample 23: Send virtio-net TX packet through VFIO](#31-sample-23-send-virtio-net-tx-packet-through-vfio)
 - [32. Sample 24: Echo one virtio-net RX packet through VFIO](#32-sample-24-echo-one-virtio-net-rx-packet-through-vfio)
 - [33. Sample 25: Run a small virtio-net echo loop through VFIO](#33-sample-25-run-a-small-virtio-net-echo-loop-through-vfio)
-- [34. Refactor 结论：samples 21-25 的代码结构](#34-refactor-结论samples-21-25-的代码结构)
-- [35. 最小心智模型](#35-最小心智模型)
+- [34. Sample 26: Drive the echo loop with VFIO IRQ eventfds](#34-sample-26-drive-the-echo-loop-with-vfio-irq-eventfds)
+- [35. Refactor 结论：samples 21-26 的代码结构](#35-refactor-结论samples-21-26-的代码结构)
+- [36. 最小心智模型](#36-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2432,9 +2434,98 @@ loop 内部做的事情：
 它的定位是证明：userspace 不仅能收一包、发一包，还能维护 ring index 和 descriptor
 生命周期，持续处理一个小批量的 packet。
 
-## 34. Refactor 结论：samples 21-25 的代码结构
+## 34. Sample 26: Drive the echo loop with VFIO IRQ eventfds
 
-本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-25 这组已经进入
+文件：
+
+```text
+userspace_drivers/26_virtio_net_irq_echo_loop.cpp
+```
+
+sample 26 延续 sample 25 的 echo loop，但等待机制从 sleep/poll `used.idx` 改成
+VFIO IRQ eventfd。它仍然会在 eventfd 被唤醒后读取 RX/TX used ring；eventfd 只是
+wait primitive，不替代 ring index 检查。
+
+运行：
+
+```bash
+./26_virtio_net_irq_echo_loop_static 0000:c1:00.6
+./26_virtio_net_irq_echo_loop_static 0000:c1:00.6 --run-ms 60000 --max-packets 3 --yes
+./26_virtio_net_irq_echo_loop_static 0000:c1:00.6 --rx-vector 0 --tx-vector 1 --dump-every-packet --yes
+```
+
+默认行为：
+
+```text
+IRQ index       = 2 (MSI-X)
+RX MSI-X vector = 0
+TX MSI-X vector = 1
+RX queue        = 0
+TX queue        = 1
+RX buffers      = 64
+TX buffers      = 8
+run-ms          = 30000
+max-packets     = 3
+match-ethertype = 0x88b5
+```
+
+`--yes` 做的事情：
+
+```text
+1. 打开 VFIO container/group/device
+2. 检查 IRQ index/vector 是否支持 EVENTFD
+3. eventfd() 创建 RX/TX interrupt eventfd
+4. VFIO_DEVICE_SET_IRQS 把 MSI-X vector 绑定到 eventfd
+5. reset device 并协商 FEATURES_OK
+6. 写 RX/TX queue_msix_vector
+7. 配置 RX/TX queue address
+8. enable RX/TX queues
+9. 写 DRIVER_OK
+10. notify RX queue
+11. poll(eventfd)
+12. eventfd 被唤醒后扫描 RX/TX used ring
+13. echo 匹配的 RX packet，并 recycle RX/TX descriptors
+14. 退出时 disable IRQ eventfd binding、reset device、unmap DMA
+```
+
+关键点：
+
+```text
+interrupt/eventfd 只表示“可能有 queue work”
+真正的完成信息仍然以 used.idx / used.ring 为准
+```
+
+Gotcha：这个设备的 MSI-X IRQ flags 里有 `NORESIZE`，所以 sample 26 不能像 sample 09
+那样对 vector 0 和 vector 1 分别做两次单独的 `VFIO_DEVICE_SET_IRQS` 绑定。它需要一次性
+提交完整的 vector fd 数组，例如 `fd_rx, fd_tx, -1, -1`，否则第二次扩大 enabled vector
+集合时可能返回 `EINVAL`。
+
+所以 sample 26 的 loop 仍然必须维护：
+
+```text
+last_rx_used_idx
+last_tx_used_idx
+RX descriptor recycle
+TX descriptor in-flight/free 状态
+```
+
+如果没有 eventfd signal，需要先确认：
+
+```text
+VFIO IRQ index 是否是 MSI-X，一般是 2
+IRQ count 是否覆盖 --rx-vector / --tx-vector
+queue_msix_vector 是否写入并 read back 成功
+对端是否真的向目标 VF 发包
+device/backend 是否会对对应 queue 产生 interrupt
+```
+
+sample 26 的定位是把 sample 25 从“主动 polling”推进到“interrupt-driven wait”。
+它仍然不处理 chained descriptors、checksum/offload metadata、control virtqueue、
+多队列调度或协议栈。
+
+## 35. Refactor 结论：samples 21-26 的代码结构
+
+本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-26 这组已经进入
 virtio-net datapath 的 sample 从“大量重复实现”收敛成“每个 sample 只展示新增概念”。
 
 完成后的分工：
@@ -2445,6 +2536,7 @@ vfio_utils.hpp
     VFIO container/group/device 打开
     IOMMU group 和 region info 打印
     PCI config region 读写
+    VFIO IRQ info / eventfd binding helper
     virtio PCI capability 解析
     COMMON_CFG / NOTIFY_CFG / DEVICE_CFG mmap helper
 
@@ -2459,7 +2551,7 @@ virtio_net_vfio.hpp
     RX used entry / packet dump / echo reply helper
 ```
 
-21-25 现在的 sample 文件只保留：
+21-26 现在的 sample 文件只保留：
 
 ```text
 Options
@@ -2482,12 +2574,15 @@ main() 参数解析
 24  把 22 的 RX path 和 23 的 TX path 接起来，做一次 RX->TX echo。
 
 25  在 24 基础上维护 RX/TX descriptor 生命周期，做有限个 packet 的 echo loop。
+
+26  在 25 基础上把 wait primitive 换成 VFIO IRQ eventfd；
+    eventfd 唤醒后仍然以 used ring 作为真实完成来源。
 ```
 
 为什么 `virtio_net_vfio.hpp` 里的函数是 `inline`：
 
 ```text
-这是 header-only helper，被 21/22/23/24/25 多个独立 executable 同时 include。
+这是 header-only helper，被 21/22/23/24/25/26 多个独立 executable 同时 include。
 函数定义放在 header 里时必须用 inline，否则链接多个 sample 时会出现 multiple definition。
 这里的 inline 是链接语义，不是为了强迫编译器内联优化。
 ```
@@ -2507,7 +2602,7 @@ libvirtio_net_vfio    CMake static library
 重复代码虽然多，但有助于每个 sample 单独说明“这一步新增了什么”。等这部分稳定后，可以
 再考虑只抽出最底层的安全/RAII helper，而不要把状态机和 queue 操作过早隐藏起来。
 
-## 35. 最小心智模型
+## 36. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 

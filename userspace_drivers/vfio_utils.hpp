@@ -12,6 +12,7 @@
 #include <linux/virtio_pci.h>
 #include <limits>
 #include <print>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -238,6 +239,49 @@ inline std::string vfio_errno_text(int error) {
   return std::strerror(error);
 }
 
+inline std::string vfio_join_flags(const std::vector<std::string_view> &flags) {
+  if (flags.empty())
+    return "none";
+
+  std::string out;
+  for (std::string_view flag : flags) {
+    if (!out.empty())
+      out += "|";
+    out += flag;
+  }
+  return out;
+}
+
+inline std::string vfio_irq_flag_names(__u32 flags) {
+  std::vector<std::string_view> names;
+  if (flags & VFIO_IRQ_INFO_EVENTFD)
+    names.push_back("EVENTFD");
+  if (flags & VFIO_IRQ_INFO_MASKABLE)
+    names.push_back("MASKABLE");
+  if (flags & VFIO_IRQ_INFO_AUTOMASKED)
+    names.push_back("AUTOMASKED");
+  if (flags & VFIO_IRQ_INFO_NORESIZE)
+    names.push_back("NORESIZE");
+  return vfio_join_flags(names);
+}
+
+inline std::string vfio_irq_name(__u32 index) {
+  switch (index) {
+  case VFIO_PCI_INTX_IRQ_INDEX:
+    return "INTx";
+  case VFIO_PCI_MSI_IRQ_INDEX:
+    return "MSI";
+  case VFIO_PCI_MSIX_IRQ_INDEX:
+    return "MSI-X";
+  case VFIO_PCI_ERR_IRQ_INDEX:
+    return "ERR";
+  case VFIO_PCI_REQ_IRQ_INDEX:
+    return "REQ";
+  default:
+    return "device-specific";
+  }
+}
+
 inline UniqueFd vfio_open_fd(const std::filesystem::path &path, int flags) {
   int fd = ::open(path.c_str(), flags | O_CLOEXEC);
   if (fd == -1) {
@@ -284,6 +328,58 @@ inline int vfio_ioctl_arg_value(int fd, unsigned long request,
                              vfio_errno_text(error));
   }
   return result;
+}
+
+inline vfio_device_info vfio_get_device_info(int device_fd) {
+  vfio_device_info info{};
+  info.argsz = sizeof(info);
+  vfio_ioctl_checked(device_fd, VFIO_DEVICE_GET_INFO, &info,
+                     "VFIO_DEVICE_GET_INFO");
+  return info;
+}
+
+inline vfio_irq_info vfio_get_irq_info(int device_fd, __u32 index) {
+  vfio_irq_info irq{};
+  irq.argsz = sizeof(irq);
+  irq.index = index;
+  vfio_ioctl_checked(device_fd, VFIO_DEVICE_GET_IRQ_INFO, &irq,
+                     "VFIO_DEVICE_GET_IRQ_INFO");
+  return irq;
+}
+
+inline void vfio_set_irq_eventfds(int device_fd, __u32 index, __u32 start,
+                                  std::span<const std::int32_t> event_fds) {
+  std::size_t data_size = event_fds.size() * sizeof(std::int32_t);
+  std::vector<std::uint8_t> storage(sizeof(vfio_irq_set) + data_size);
+  auto *irq_set = reinterpret_cast<vfio_irq_set *>(storage.data());
+  irq_set->argsz = static_cast<__u32>(storage.size());
+  irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+  irq_set->index = index;
+  irq_set->start = start;
+  irq_set->count = static_cast<__u32>(event_fds.size());
+  std::memcpy(irq_set->data, event_fds.data(), data_size);
+
+  vfio_ioctl_checked(device_fd, VFIO_DEVICE_SET_IRQS, irq_set,
+                     "VFIO_DEVICE_SET_IRQS(eventfd trigger)");
+}
+
+inline void vfio_set_irq_eventfd(int device_fd, __u32 index, __u32 vector,
+                                 std::int32_t event_fd) {
+  vfio_set_irq_eventfds(device_fd, index, vector,
+                        std::span<const std::int32_t>(&event_fd, 1));
+}
+
+inline void vfio_disable_irq_index(int device_fd, __u32 index) {
+  std::vector<std::uint8_t> storage(sizeof(vfio_irq_set));
+  auto *irq_set = reinterpret_cast<vfio_irq_set *>(storage.data());
+  irq_set->argsz = static_cast<__u32>(storage.size());
+  irq_set->flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
+  irq_set->index = index;
+  irq_set->start = 0;
+  irq_set->count = 0;
+
+  vfio_ioctl_checked(device_fd, VFIO_DEVICE_SET_IRQS, irq_set,
+                     "VFIO_DEVICE_SET_IRQS(disable irq index)");
 }
 
 inline DriverInfo current_driver(const std::filesystem::path &dev_dir) {
