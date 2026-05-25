@@ -51,12 +51,16 @@ constexpr unsigned VIRTIO_NET_F_MAC = 5;
 constexpr unsigned VIRTIO_NET_F_STATUS = 16;
 constexpr unsigned VIRTIO_NET_F_CTRL_VQ = 17;
 constexpr unsigned VIRTIO_NET_F_CTRL_RX = 18;
+constexpr unsigned VIRTIO_NET_F_CTRL_MAC_ADDR = 23;
 constexpr std::uint8_t kVirtioNetCtrlRx = 0;
 constexpr std::uint8_t kVirtioNetCtrlRxPromisc = 0;
+constexpr std::uint8_t kVirtioNetCtrlMac = 1;
+constexpr std::uint8_t kVirtioNetCtrlMacAddrSet = 1;
 constexpr std::uint8_t kVirtioNetOk = 0;
 constexpr std::uint8_t kVirtioNetErr = 1;
 constexpr std::size_t kVirtioNetCtrlHdrSize = 2;
 constexpr std::size_t kVirtioNetCtrlStateSize = 1;
+constexpr std::size_t kVirtioNetCtrlMacAddrSize = 6;
 constexpr std::size_t kVirtioNetCtrlAckSize = 1;
 constexpr std::uint8_t kVirtioNetCtrlAckInitial = 0xff;
 constexpr std::size_t kVirtioNetConfigMac = 0;
@@ -142,6 +146,8 @@ struct CtrlqDmaLayout {
   std::size_t rx_buffers_size = 0;
   std::size_t ctrl_command_offset = 0;
   std::size_t ctrl_hdr_offset = 0;
+  std::size_t ctrl_data_offset = 0;
+  std::size_t ctrl_data_size = 0;
   std::size_t ctrl_state_offset = 0;
   std::size_t ctrl_ack_offset = 0;
   std::size_t total_size = 0;
@@ -715,6 +721,25 @@ ctrl_rx_guest_features(const std::vector<std::uint32_t> &device_features) {
   return guest;
 }
 
+inline std::vector<std::uint32_t>
+ctrl_mac_addr_guest_features(
+    const std::vector<std::uint32_t> &device_features) {
+  if (!feature_is_set(device_features, VIRTIO_NET_F_CTRL_VQ)) {
+    throw std::runtime_error(
+        "device does not offer VIRTIO_NET_F_CTRL_VQ; no control virtqueue");
+  }
+  if (!feature_is_set(device_features, VIRTIO_NET_F_CTRL_MAC_ADDR)) {
+    throw std::runtime_error(
+        "device does not offer VIRTIO_NET_F_CTRL_MAC_ADDR; cannot set MAC "
+        "address through control virtqueue");
+  }
+
+  std::vector<std::uint32_t> guest = minimal_guest_features(device_features);
+  set_feature(guest, VIRTIO_NET_F_CTRL_VQ);
+  set_feature(guest, VIRTIO_NET_F_CTRL_MAC_ADDR);
+  return guest;
+}
+
 inline void write_guest_feature_words(
     MappedRegion &mapping, std::size_t mapping_delta,
     const std::vector<std::uint32_t> &words) {
@@ -750,6 +775,41 @@ negotiate_ctrl_rx_features(MappedRegion &mapping, std::size_t mapping_delta) {
 
   std::vector<std::uint32_t> guest_features =
       ctrl_rx_guest_features(device_features.words);
+  print_feature_words("Guest feature words", guest_features);
+  write_guest_feature_words(mapping, mapping_delta, guest_features);
+
+  constexpr std::uint8_t features_ok_status =
+      VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER |
+      VIRTIO_CONFIG_S_FEATURES_OK;
+  write_status(mapping, mapping_delta, features_ok_status);
+
+  std::uint8_t after_features_ok = read_status(mapping, mapping_delta);
+  print_status("after FEATURES_OK", after_features_ok);
+  if (!(after_features_ok & VIRTIO_CONFIG_S_FEATURES_OK))
+    throw std::runtime_error("device rejected FEATURES_OK");
+
+  return guest_features;
+}
+
+inline std::vector<std::uint32_t>
+negotiate_ctrl_mac_addr_features(MappedRegion &mapping,
+                                 std::size_t mapping_delta) {
+  reset_device(mapping, mapping_delta, "after reset");
+
+  write_status(mapping, mapping_delta, VIRTIO_CONFIG_S_ACKNOWLEDGE);
+  print_status("after ACKNOWLEDGE", read_status(mapping, mapping_delta));
+
+  write_status(mapping, mapping_delta,
+               VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
+  print_status("after DRIVER", read_status(mapping, mapping_delta));
+
+  FeatureWords device_features =
+      read_feature_words(mapping, mapping_delta, VIRTIO_PCI_COMMON_DFSELECT,
+                         VIRTIO_PCI_COMMON_DF, kFeatureWords);
+  print_feature_words("Device feature words", device_features.words);
+
+  std::vector<std::uint32_t> guest_features =
+      ctrl_mac_addr_guest_features(device_features.words);
   print_feature_words("Guest feature words", guest_features);
   write_guest_feature_words(mapping, mapping_delta, guest_features);
 
@@ -1000,7 +1060,8 @@ inline DmaLayout compute_dma_layout(std::uint16_t rx_queue_size,
 inline CtrlqDmaLayout compute_ctrlq_dma_layout(
     std::uint16_t rx_queue_size, std::uint16_t tx_queue_size,
     std::uint16_t ctrl_queue_size, std::size_t align,
-    std::uint16_t rx_buffers, std::size_t rx_buffer_size) {
+    std::uint16_t rx_buffers, std::size_t rx_buffer_size,
+    std::size_t ctrl_data_size = kVirtioNetCtrlStateSize) {
   if (rx_buffers == 0)
     throw std::runtime_error("rx-buffers must be greater than 0");
   if (rx_buffers > rx_queue_size) {
@@ -1013,6 +1074,10 @@ inline CtrlqDmaLayout compute_ctrlq_dma_layout(
     throw std::runtime_error(
         "control queue-size must be at least 3 for this descriptor chain");
   }
+  if (ctrl_data_size == 0)
+    throw std::runtime_error("control command data size must be greater than 0");
+  if (ctrl_data_size > std::numeric_limits<std::uint32_t>::max())
+    throw std::runtime_error("control command data is too large");
 
   CtrlqDmaLayout layout;
   layout.rx_vring = compute_vring_layout(rx_queue_size, align);
@@ -1035,10 +1100,10 @@ inline CtrlqDmaLayout compute_ctrlq_dma_layout(
                                    layout.rx_buffers_size,
                                    "RX buffer area end"));
   layout.ctrl_hdr_offset = layout.ctrl_command_offset;
-  layout.ctrl_state_offset =
-      layout.ctrl_hdr_offset + kVirtioNetCtrlHdrSize;
-  layout.ctrl_ack_offset =
-      layout.ctrl_state_offset + kVirtioNetCtrlStateSize;
+  layout.ctrl_data_offset = layout.ctrl_hdr_offset + kVirtioNetCtrlHdrSize;
+  layout.ctrl_data_size = ctrl_data_size;
+  layout.ctrl_state_offset = layout.ctrl_data_offset;
+  layout.ctrl_ack_offset = layout.ctrl_data_offset + layout.ctrl_data_size;
   layout.total_size =
       round_up_to_page(checked_add(layout.ctrl_ack_offset,
                                    kVirtioNetCtrlAckSize,
@@ -1119,8 +1184,9 @@ inline void print_ctrlq_dma_layout(const CtrlqDmaLayout &layout,
                layout.ctrl_command_offset);
   std::println("  control header IOVA: 0x{:x}",
                base_iova + layout.ctrl_hdr_offset);
-  std::println("  control state IOVA: 0x{:x}",
-               base_iova + layout.ctrl_state_offset);
+  std::println("  control data IOVA: 0x{:x}",
+               base_iova + layout.ctrl_data_offset);
+  std::println("  control data bytes: {}", layout.ctrl_data_size);
   std::println("  control ACK IOVA: 0x{:x}",
                base_iova + layout.ctrl_ack_offset);
   std::println("  mapped bytes: {}", layout.total_size);
@@ -1255,8 +1321,13 @@ inline void publish_rx_promisc_control_command(
     std::uint8_t *ctrl_queue_base, std::uint8_t *dma_base,
     const CtrlqDmaLayout &layout, std::uint64_t base_iova, bool promisc) {
   std::uint8_t *header = dma_base + layout.ctrl_hdr_offset;
-  std::uint8_t *state = dma_base + layout.ctrl_state_offset;
+  std::uint8_t *state = dma_base + layout.ctrl_data_offset;
   std::uint8_t *ack = dma_base + layout.ctrl_ack_offset;
+
+  if (layout.ctrl_data_size < kVirtioNetCtrlStateSize) {
+    throw std::runtime_error(
+        "control command data area is too small for RX_PROMISC state");
+  }
 
   header[0] = kVirtioNetCtrlRx;
   header[1] = kVirtioNetCtrlRxPromisc;
@@ -1268,8 +1339,48 @@ inline void publish_rx_promisc_control_command(
   desc[0].len = kVirtioNetCtrlHdrSize;
   desc[0].flags = kVringDescFNext;
   desc[0].next = 1;
-  desc[1].addr = base_iova + layout.ctrl_state_offset;
+  desc[1].addr = base_iova + layout.ctrl_data_offset;
   desc[1].len = kVirtioNetCtrlStateSize;
+  desc[1].flags = kVringDescFNext;
+  desc[1].next = 2;
+  desc[2].addr = base_iova + layout.ctrl_ack_offset;
+  desc[2].len = kVirtioNetCtrlAckSize;
+  desc[2].flags = kVringDescFWrite;
+  desc[2].next = 0;
+
+  std::uint16_t *avail_ring = vring_avail_ring(ctrl_queue_base,
+                                               layout.ctrl_vring);
+  avail_ring[0] = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  *vring_avail_idx(ctrl_queue_base, layout.ctrl_vring) = 1;
+  std::atomic_thread_fence(std::memory_order_release);
+}
+
+inline void publish_mac_addr_control_command(
+    std::uint8_t *ctrl_queue_base, std::uint8_t *dma_base,
+    const CtrlqDmaLayout &layout, std::uint64_t base_iova,
+    const std::array<std::uint8_t, 6> &mac) {
+  std::uint8_t *header = dma_base + layout.ctrl_hdr_offset;
+  std::uint8_t *data = dma_base + layout.ctrl_data_offset;
+  std::uint8_t *ack = dma_base + layout.ctrl_ack_offset;
+
+  if (layout.ctrl_data_size < kVirtioNetCtrlMacAddrSize) {
+    throw std::runtime_error(
+        "control command data area is too small for MAC_ADDR_SET");
+  }
+
+  header[0] = kVirtioNetCtrlMac;
+  header[1] = kVirtioNetCtrlMacAddrSet;
+  std::copy(mac.begin(), mac.end(), data);
+  ack[0] = kVirtioNetCtrlAckInitial;
+
+  VringDesc *desc = vring_descs(ctrl_queue_base, layout.ctrl_vring);
+  desc[0].addr = base_iova + layout.ctrl_hdr_offset;
+  desc[0].len = kVirtioNetCtrlHdrSize;
+  desc[0].flags = kVringDescFNext;
+  desc[0].next = 1;
+  desc[1].addr = base_iova + layout.ctrl_data_offset;
+  desc[1].len = kVirtioNetCtrlMacAddrSize;
   desc[1].flags = kVringDescFNext;
   desc[1].next = 2;
   desc[2].addr = base_iova + layout.ctrl_ack_offset;

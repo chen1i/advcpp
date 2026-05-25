@@ -33,13 +33,14 @@
 26_virtio_net_irq_echo_loop.cpp  使用 VFIO IRQ eventfd 驱动 echo loop
 27_virtio_net_ctrl_promisc.cpp  通过 control virtqueue 发送 RX_PROMISC 命令
 28_virtio_net_promisc_observe.cpp  设置 promisc 后保持运行并观察非本机 MAC 的 RX
+29_virtio_net_ctrl_mac_addr.cpp  通过 control virtqueue 临时设置 MAC 并观察 RX
 ```
 
 当前 `userspace_drivers/` 的代码组织：
 
 ```text
 11-20: 仍保持每个 sample 尽量自包含，方便逐步学习 VFIO / virtio PCI 机制
-21-28: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
+21-29: 已提取公共 virtio-net VFIO datapath helper，sample 文件只保留本节新增逻辑
 
 vfio_utils.hpp       通用 VFIO / PCI config / region / capability helper
 virtio_net_vfio.hpp  virtio-net queue、vring、DMA、feature、notify、packet helper
@@ -86,8 +87,9 @@ virtio-net datapath，所以复用 helper 能降低维护成本，同时保留�
 - [34. Sample 26: Drive the echo loop with VFIO IRQ eventfds](#34-sample-26-drive-the-echo-loop-with-vfio-irq-eventfds)
 - [35. Sample 27: Send virtio-net control command through VFIO](#35-sample-27-send-virtio-net-control-command-through-vfio)
 - [36. Sample 28: Observe virtio-net promiscuous RX behavior](#36-sample-28-observe-virtio-net-promiscuous-rx-behavior)
-- [37. Refactor 结论：samples 21-28 的代码结构](#37-refactor-结论samples-21-28-的代码结构)
-- [38. 最小心智模型](#38-最小心智模型)
+- [37. Sample 29: Set virtio-net MAC address through VFIO](#37-sample-29-set-virtio-net-mac-address-through-vfio)
+- [38. Refactor 结论：samples 21-29 的代码结构](#38-refactor-结论samples-21-29-的代码结构)
+- [39. 最小心智模型](#39-最小心智模型)
 
 ## 1. Driver 开发的基本路线
 
@@ -2702,9 +2704,100 @@ sample 28 仍然不是完整 sniffing driver：它只演示 control-plane 改 RX
 observable datapath 行为，不处理 offload、multi-buffer packet、VLAN filter、MAC table
 或长期运行的 packet capture。
 
-## 37. Refactor 结论：samples 21-28 的代码结构
+## 37. Sample 29: Set virtio-net MAC address through VFIO
 
-本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-28 这组已经进入
+文件：
+
+```text
+userspace_drivers/29_virtio_net_ctrl_mac_addr.cpp
+```
+
+sample 29 继续使用 control virtqueue，但命令从 sample 27/28 的 `RX_PROMISC` 换成
+`MAC_ADDR_SET`。它协商 `VIRTIO_NET_F_CTRL_MAC_ADDR`，通过 control queue 临时设置 VF 的
+MAC 地址，然后保持 device running，观察发往这个临时 MAC 的 RX packet 是否进入 used
+ring。
+
+默认临时 MAC：
+
+```text
+02:00:00:00:29:01
+```
+
+运行：
+
+```bash
+./29_virtio_net_ctrl_mac_addr_static 0000:c1:00.6
+./29_virtio_net_ctrl_mac_addr_static 0000:c1:00.6 --new-mac 02:00:00:00:29:01 --wait-ms 60000 --yes
+./29_virtio_net_ctrl_mac_addr_static 0000:c1:00.6 --new-mac 02:00:00:00:29:02 --accept-any-ethertype --yes
+```
+
+接收端：
+
+```bash
+./29_virtio_net_ctrl_mac_addr_static 0000:c1:00.6 --new-mac 02:00:00:00:29:01 --wait-ms 60000 --stop-after 1 --yes
+```
+
+发送端从 VF#0 `ens6f1v0` 发一帧目的 MAC 为临时 MAC 的 `0x88b5` frame：
+
+```bash
+python 22_test_raw.py \
+  --iface ens6f1v0 \
+  --src-mac fe:bf:30:01:30:01 \
+  --dst-mac 02:00:00:00:29:01 \
+  --ethertype 0x88b5 \
+  --payload-hex 6d61632d616464722d7365742d746573742d30303239000102030405060708090a0b0c0d0e0f \
+  --count 3 \
+  --interval 0.1
+```
+
+DPU 侧可以用 representor 确认 frame 经过 VF#3：
+
+```bash
+tcpdump -eni en3f0pf0sf3003 'ether proto 0x88b5 or ether host 02:00:00:00:29:01'
+```
+
+`--yes` 做的事情：
+
+```text
+1. 打开 VFIO container/group/device
+2. 打开 PCI Memory Space / Bus Master
+3. reset device
+4. 协商 FEATURES_OK，并接受 VIRTIO_NET_F_CTRL_VQ / VIRTIO_NET_F_CTRL_MAC_ADDR
+5. 配置 RX queue 0、TX queue 1、control queue 2
+6. 发布 RX buffers
+7. 发布 MAC_ADDR_SET control descriptor chain：
+   control header -> 6-byte MAC data -> writable ACK byte
+8. enable RX/TX/control queues
+9. 写 DRIVER_OK
+10. notify RX queue
+11. notify control queue
+12. 等待 control ACK 0x00
+13. 在临时 MAC 生效期间继续 poll RX used.idx
+14. 对收到的 packet 打印 destination/source MAC、是否匹配原始 MAC/临时 MAC
+15. recycle RX descriptor，保持 RX queue 可以继续收包
+16. reset device，恢复 PCI command，unmap DMA
+```
+
+通过标准：
+
+```text
+control ACK byte: 0x00 (OK)
+Observed RX packet ...
+dst matches temporary MAC: yes
+this is the expected MAC_ADDR_SET-path observation
+```
+
+如果 control ACK 是 OK，但发往临时 MAC 的包没有进入 RX，需要先在 DPU representor 上确认
+frame 是否真的经过 VF#3 backend port。这个 command 改的是 virtio-net device/filter
+侧状态，不会自动修改 OVS bridge 的转发规则。
+
+sample 29 退出前会 reset device，所以临时 MAC 不会长期保留。它仍然不是完整 netdev
+driver：不处理 Linux netdev 地址同步、MAC table、多播过滤、VLAN filter 或长期 control
+plane。
+
+## 38. Refactor 结论：samples 21-29 的代码结构
+
+本轮 refactor 的目标不是把 tutorial 改成一个 framework，而是把 21-29 这组已经进入
 virtio-net datapath 的 sample 从“大量重复实现”收敛成“每个 sample 只展示新增概念”。
 
 完成后的分工：
@@ -2730,7 +2823,7 @@ virtio_net_vfio.hpp
     RX used entry / packet dump / echo reply helper
 ```
 
-21-28 现在的 sample 文件只保留：
+21-29 现在的 sample 文件只保留：
 
 ```text
 Options
@@ -2762,6 +2855,9 @@ main() 参数解析
 
 28  在 RX_PROMISC command ACK 后保持 device running；
     观察非 VF MAC 目的地址的 packet 是否进入 RX used ring。
+
+29  发送 MAC_ADDR_SET control command；
+    观察发往临时 MAC 的 packet 是否进入 RX used ring。
 ```
 
 为什么 `virtio_net_vfio.hpp` 里的函数是 `inline`：
@@ -2787,7 +2883,7 @@ libvirtio_net_vfio    CMake static library
 重复代码虽然多，但有助于每个 sample 单独说明“这一步新增了什么”。等这部分稳定后，可以
 再考虑只抽出最底层的安全/RAII helper，而不要把状态机和 queue 操作过早隐藏起来。
 
-## 38. 最小心智模型
+## 39. 最小心智模型
 
 把现在学到的内容压缩成一张图：
 
