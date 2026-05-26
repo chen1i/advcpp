@@ -13,6 +13,7 @@ binding, or missing PMDs, not by C++ code.
 | 03 | [Ethdev Info](03_ethdev_info.cpp) | Inspect queue limits, descriptor limits, offload capabilities, RSS capabilities, supported packet types, and link metadata |
 | 04 | [Ethdev Configure](04_ethdev_configure.cpp) | Call `rte_eth_dev_configure()` with a minimal `rte_eth_conf`, verify configured queue counts, and close the port without queue setup or start |
 | 05 | [Ethdev Queue Setup](05_ethdev_queue_setup.cpp) | Create an mbuf mempool, adjust descriptor counts, set up RX/TX queues, and close the port without starting packet I/O |
+| 06 | [Ethdev Start/Stop](06_ethdev_start_stop.cpp) | Start a fully configured port, observe link state, then stop and close it without RX/TX bursts |
 
 ## Build
 
@@ -42,6 +43,12 @@ For a first smoke test on a machine with DPDK installed:
 
 The sample does not configure queues or send packets. It only initializes EAL
 and prints what DPDK can see.
+
+Most early commands use `--no-huge` deliberately. It keeps the samples focused
+on ethdev lifecycle calls instead of hugepage placement. If you omit
+`--no-huge`, EAL and the PMD allocate from hugepage memory; the target NUMA node
+must have usable hugepages or PCI probe/virtqueue allocation can fail before
+the application receives an ethdev port.
 
 To let DPDK probe one PCI device without touching queues, use sample 02 with an
 EAL allowlist. Put `-a` before the application `--` separator:
@@ -120,6 +127,20 @@ with `-l 0` even when the target PCI device is on a different NUMA node. Use
 `--socket port` when you want queue and mbuf memory allocated on the device's
 reported socket. This sample still does not call `rte_eth_dev_start()`, so no
 packet can be received or transmitted yet.
+
+Sample 06 starts the configured port, waits briefly for link state, then stops
+and closes it:
+
+```bash
+./06_ethdev_start_stop_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --port-name 0000:c1:00.6 --yes
+```
+
+`rte_eth_dev_start()` success is the main pass condition. Link state is printed
+but does not fail the sample by default, because virtual devices may report
+link status according to backend policy. Add `--require-link-up` when the test
+environment should guarantee an up link. This sample still does not call
+`rte_eth_rx_burst()` or `rte_eth_tx_burst()`.
 
 ## Static DPDK Binary
 

@@ -88,6 +88,7 @@ else()
     add_dpdk_exercise(03_ethdev_info)
     add_dpdk_exercise(04_ethdev_configure)
     add_dpdk_exercise(05_ethdev_queue_setup)
+    add_dpdk_exercise(06_ethdev_start_stop)
 
     if(DPDK_STATIC_ETHDEV_ARCHIVE AND NOT DPDK_MINIMAL_STATIC_MISSING)
         message(STATUS "Found minimal DPDK static archives; static exercise targets are enabled")
