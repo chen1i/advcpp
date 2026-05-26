@@ -10,6 +10,7 @@ binding, or missing PMDs, not by C++ code.
 |---|----------|----------------|
 | 01 | [Environment Check](01_env_check.cpp) | Initialize EAL, inspect lcores, hugepages, VFIO, IOVA mode, and visible ethdev ports |
 | 02 | [PCI Probe Visibility](02_pci_probe.cpp) | Use EAL PCI allowlists, inspect registered devargs, and map probed ethdev ports back to their rte_device metadata |
+| 03 | [Ethdev Info](03_ethdev_info.cpp) | Inspect queue limits, descriptor limits, offload capabilities, RSS capabilities, supported packet types, and link metadata |
 
 ## Build
 
@@ -59,6 +60,18 @@ If the target device is a virtio-net VF bound to `vfio-pci`, a successful probe
 should show one available ethdev port, its PMD driver, MAC address, and the
 backing `rte_device` name/bus/devargs. The sample still does not call
 `rte_eth_dev_configure()` or set up RX/TX queues.
+
+After sample 02 proves that the BDF becomes a DPDK port, sample 03 reads the
+port capabilities that later configuration samples must obey:
+
+```bash
+env XDG_RUNTIME_DIR=/tmp ./03_ethdev_info_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --port-name 0000:c1:00.6
+```
+
+This prints queue limits, descriptor alignment/min/max values, RX/TX offload
+capability bitmaps, RSS capability information, supported packet types, and
+basic link metadata. It still does not configure queues or start the device.
 
 ## Static DPDK Binary
 
