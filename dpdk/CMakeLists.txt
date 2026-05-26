@@ -82,6 +82,7 @@ else()
     add_dpdk_exercise(01_env_check)
     add_dpdk_exercise(02_pci_probe)
     add_dpdk_exercise(03_ethdev_info)
+    add_dpdk_exercise(04_ethdev_configure)
 
     if(DPDK_STATIC_ETHDEV_ARCHIVE AND NOT DPDK_MINIMAL_STATIC_MISSING)
         message(STATUS "Found minimal DPDK static archives; static exercise targets are enabled")

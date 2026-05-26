@@ -11,6 +11,7 @@ binding, or missing PMDs, not by C++ code.
 | 01 | [Environment Check](01_env_check.cpp) | Initialize EAL, inspect lcores, hugepages, VFIO, IOVA mode, and visible ethdev ports |
 | 02 | [PCI Probe Visibility](02_pci_probe.cpp) | Use EAL PCI allowlists, inspect registered devargs, and map probed ethdev ports back to their rte_device metadata |
 | 03 | [Ethdev Info](03_ethdev_info.cpp) | Inspect queue limits, descriptor limits, offload capabilities, RSS capabilities, supported packet types, and link metadata |
+| 04 | [Ethdev Configure](04_ethdev_configure.cpp) | Call `rte_eth_dev_configure()` with a minimal `rte_eth_conf`, verify configured queue counts, and close the port without queue setup or start |
 
 ## Build
 
@@ -72,6 +73,28 @@ env XDG_RUNTIME_DIR=/tmp ./03_ethdev_info_static -l 0 -n 4 --no-huge \
 This prints queue limits, descriptor alignment/min/max values, RX/TX offload
 capability bitmaps, RSS capability information, supported packet types, and
 basic link metadata. It still does not configure queues or start the device.
+
+Sample 04 is the first state-changing ethdev call. The default invocation is a
+dry run that validates the requested queue counts and prints the
+`rte_eth_dev_configure()` plan:
+
+```bash
+env XDG_RUNTIME_DIR=/tmp ./04_ethdev_configure_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --port-name 0000:c1:00.6
+```
+
+Add `--yes` to actually configure one RX queue and one TX queue, then close the
+port before EAL cleanup:
+
+```bash
+env XDG_RUNTIME_DIR=/tmp ./04_ethdev_configure_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --port-name 0000:c1:00.6 --yes
+```
+
+This still does not call `rte_eth_rx_queue_setup()`,
+`rte_eth_tx_queue_setup()`, or `rte_eth_dev_start()`. If it succeeds, the
+post-configure `rte_eth_dev_info_get()` output should show the configured RX/TX
+queue counts changing from zero to the requested values.
 
 ## Static DPDK Binary
 
