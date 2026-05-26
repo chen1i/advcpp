@@ -9,6 +9,7 @@ binding, or missing PMDs, not by C++ code.
 | # | Exercise | What you learn |
 |---|----------|----------------|
 | 01 | [Environment Check](01_env_check.cpp) | Initialize EAL, inspect lcores, hugepages, VFIO, IOVA mode, and visible ethdev ports |
+| 02 | [PCI Probe Visibility](02_pci_probe.cpp) | Use EAL PCI allowlists, inspect registered devargs, and map probed ethdev ports back to their rte_device metadata |
 
 ## Build
 
@@ -39,10 +40,30 @@ For a first smoke test on a machine with DPDK installed:
 The sample does not configure queues or send packets. It only initializes EAL
 and prints what DPDK can see.
 
+To let DPDK probe one PCI device without touching queues, use sample 02 with an
+EAL allowlist. Put `-a` before the application `--` separator:
+
+```bash
+./dpdk/build/02_pci_probe -l 0 -n 4 --no-huge -a 0000:c1:00.6 -- \
+  --expect-port 0000:c1:00.6
+```
+
+For the portable static binary on the target host:
+
+```bash
+env XDG_RUNTIME_DIR=/tmp ./02_pci_probe_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --expect-port 0000:c1:00.6
+```
+
+If the target device is a virtio-net VF bound to `vfio-pci`, a successful probe
+should show one available ethdev port, its PMD driver, MAC address, and the
+backing `rte_device` name/bus/devargs. The sample still does not call
+`rte_eth_dev_configure()` or set up RX/TX queues.
+
 ## Static DPDK Binary
 
 When DPDK static archives such as `librte_ethdev.a` are installed, the build
-also creates `01_env_check_static`. This target links a small required subset of
+also creates `*_static` binaries. These targets link a small required subset of
 DPDK static archives directly instead of using the full `pkg-config --static
 libdpdk` link line. That keeps the smoke-test binary portable enough for hosts
 that do not have matching `librte_*.so.<abi>` libraries installed, and it avoids
@@ -55,6 +76,8 @@ and avoids a runtime dependency on the build host's glibc symbol versions:
 
 ```bash
 ./dpdk/build/01_env_check_static -l 0-1 -n 4 --no-pci --no-huge
+./dpdk/build/02_pci_probe_static -l 0 -n 4 --no-huge -a 0000:c1:00.6 -- \
+  --expect-port 0000:c1:00.6
 ```
 
 Use this binary when the target machine does not have matching
@@ -70,7 +93,7 @@ For a separate static DPDK install under `/opt/dpdk-25.11-static`:
 env PKG_CONFIG_PATH=/opt/dpdk-25.11-static/lib/pkgconfig \
   cmake -S dpdk -B dpdk/build-static
 
-cmake --build dpdk/build-static --target 01_env_check_static
+cmake --build dpdk/build-static
 ```
 
 Check that the resulting binary is fully static:

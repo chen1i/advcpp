@@ -19,7 +19,10 @@ else()
         NO_DEFAULT_PATH)
 
     set(DPDK_MINIMAL_STATIC_LIBS
+        net_virtio
+        bus_pci
         ethdev
+        pci
         net
         mbuf
         mempool
@@ -60,6 +63,8 @@ else()
             target_compile_options(${name}_static PRIVATE
                 ${DPDK_STATIC_CFLAGS_OTHER})
             target_link_libraries(${name}_static PRIVATE
+                -Wl,-u,rte_pci_bus
+                -Wl,-u,this_pmd_namenet_virtio
                 -Wl,--start-group
                 ${DPDK_MINIMAL_STATIC_ARCHIVES}
                 -Wl,--end-group
@@ -75,6 +80,7 @@ else()
     endfunction()
 
     add_dpdk_exercise(01_env_check)
+    add_dpdk_exercise(02_pci_probe)
 
     if(DPDK_STATIC_ETHDEV_ARCHIVE AND NOT DPDK_MINIMAL_STATIC_MISSING)
         message(STATUS "Found minimal DPDK static archives; static exercise targets are enabled")
