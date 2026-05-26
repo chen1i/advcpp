@@ -26,6 +26,7 @@ else()
         net
         mbuf
         mempool
+        mempool_ring
         ring
         rcu
         eal
@@ -65,6 +66,9 @@ else()
             target_link_libraries(${name}_static PRIVATE
                 -Wl,-u,rte_pci_bus
                 -Wl,-u,this_pmd_namenet_virtio
+                -Wl,--whole-archive
+                ${DPDK_STATIC_MEMPOOL_RING_ARCHIVE}
+                -Wl,--no-whole-archive
                 -Wl,--start-group
                 ${DPDK_MINIMAL_STATIC_ARCHIVES}
                 -Wl,--end-group
@@ -83,6 +87,7 @@ else()
     add_dpdk_exercise(02_pci_probe)
     add_dpdk_exercise(03_ethdev_info)
     add_dpdk_exercise(04_ethdev_configure)
+    add_dpdk_exercise(05_ethdev_queue_setup)
 
     if(DPDK_STATIC_ETHDEV_ARCHIVE AND NOT DPDK_MINIMAL_STATIC_MISSING)
         message(STATUS "Found minimal DPDK static archives; static exercise targets are enabled")

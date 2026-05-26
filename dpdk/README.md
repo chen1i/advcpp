@@ -12,6 +12,7 @@ binding, or missing PMDs, not by C++ code.
 | 02 | [PCI Probe Visibility](02_pci_probe.cpp) | Use EAL PCI allowlists, inspect registered devargs, and map probed ethdev ports back to their rte_device metadata |
 | 03 | [Ethdev Info](03_ethdev_info.cpp) | Inspect queue limits, descriptor limits, offload capabilities, RSS capabilities, supported packet types, and link metadata |
 | 04 | [Ethdev Configure](04_ethdev_configure.cpp) | Call `rte_eth_dev_configure()` with a minimal `rte_eth_conf`, verify configured queue counts, and close the port without queue setup or start |
+| 05 | [Ethdev Queue Setup](05_ethdev_queue_setup.cpp) | Create an mbuf mempool, adjust descriptor counts, set up RX/TX queues, and close the port without starting packet I/O |
 
 ## Build
 
@@ -96,6 +97,30 @@ This still does not call `rte_eth_rx_queue_setup()`,
 post-configure `rte_eth_dev_info_get()` output should show the configured RX/TX
 queue counts changing from zero to the requested values.
 
+Sample 05 adds the next two state changes: packet mbuf pool creation and RX/TX
+queue setup. The dry run shows the exact configure, mempool, descriptor, and
+queue setup plan:
+
+```bash
+./05_ethdev_queue_setup_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --port-name 0000:c1:00.6
+```
+
+Add `--yes` to configure the port, create an `rte_pktmbuf_pool`, let the PMD
+adjust requested descriptor counts, set up one RX queue and one TX queue, then
+close the port and free the mempool:
+
+```bash
+./05_ethdev_queue_setup_static -l 0 -n 4 --no-huge \
+  -a 0000:c1:00.6 -- --port-name 0000:c1:00.6 --yes
+```
+
+The default memory socket is `SOCKET_ID_ANY` because this tutorial often runs
+with `-l 0` even when the target PCI device is on a different NUMA node. Use
+`--socket port` when you want queue and mbuf memory allocated on the device's
+reported socket. This sample still does not call `rte_eth_dev_start()`, so no
+packet can be received or transmitted yet.
+
 ## Static DPDK Binary
 
 When DPDK static archives such as `librte_ethdev.a` are installed, the build
@@ -105,6 +130,11 @@ libdpdk` link line. That keeps the smoke-test binary portable enough for hosts
 that do not have matching `librte_*.so.<abi>` libraries installed, and it avoids
 pulling optional PMD dependencies such as libbsd, libfdt, libarchive, OpenSSL,
 pcap, and jansson into this first sample.
+
+Static DPDK PMDs and mempool ops are registered by constructors, so archives
+that provide plugin-style objects sometimes need explicit linker nudges. The
+build forces in the PCI bus, virtio-net PMD, and ring mempool ops used by these
+early exercises.
 
 The static target is a fully static ELF, matching the portability model used by
 the `userspace_drivers/*_static` samples. It statically links the C++ runtime
